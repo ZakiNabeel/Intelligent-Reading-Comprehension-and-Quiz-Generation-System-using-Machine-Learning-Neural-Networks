@@ -1,10 +1,11 @@
 import joblib
 import numpy as np
 
+from typing import Dict, Tuple
 from pathlib import Path
 
 from sklearn.metrics.pairwise import cosine_similarity
-from scipy.sparse import hstack
+from scipy.sparse import hstack, csr_matrix
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -25,49 +26,37 @@ vectorizer = joblib.load(
     MODEL_DIR / "tfidf_vectorizer.pkl"
 )
 
-
-def build_combined_text(article, question, option_text):
-
-    return (
-        article + " " +
-        article + " " +
-        question + " " +
-        option_text
-    )
+# Ensemble weights for final score calculation
+LR_WEIGHT = 0.6
+SVM_WEIGHT = 0.4
 
 
-def compute_cosine_features(article, question, option_text):
-
-    article_vec = vectorizer.transform([article])
-
-    question_vec = vectorizer.transform([question])
-
-    option_vec = vectorizer.transform([option_text])
-
-    q_opt = cosine_similarity(
-        question_vec,
-        option_vec
-    )[0][0]
-
-    art_opt = cosine_similarity(
-        article_vec,
-        option_vec
-    )[0][0]
-
-    art_q = cosine_similarity(
-        article_vec,
-        question_vec
-    )[0][0]
-
-    return np.array([
-        q_opt,
-        art_opt,
-        art_q
-    ]).reshape(1, -1)
+def build_combined_text(article: str, question: str, option_text: str) -> str:
+    """Combines article, question, and option into a single string for vectorization."""
+    return f"{article} {article} {question} {option_text}"
 
 
-def prepare_features(article, question, option_text):
+def compute_cosine_features(article: str, question: str, option_text: str) -> np.ndarray:
+    """Computes cosine similarity features between article, question, and option."""
+    # Transform all texts at once for efficiency
+    vecs = vectorizer.transform([article, question, option_text])
+    article_vec, question_vec, option_vec = vecs[0], vecs[1], vecs[2]
 
+    q_opt = cosine_similarity(question_vec, option_vec)[0][0]
+
+    art_opt = cosine_similarity(article_vec, option_vec)[0][0]
+
+    art_q = cosine_similarity(article_vec, question_vec)[0][0]
+
+    return np.array([q_opt, art_opt, art_q]).reshape(1, -1)
+
+
+def prepare_features(
+    article: str, question: str, option_text: str
+) -> csr_matrix:
+    """
+    Prepares the final feature vector by combining TF-IDF and cosine similarity features.
+    """
     combined_text = build_combined_text(
         article,
         question,
@@ -90,12 +79,15 @@ def prepare_features(article, question, option_text):
     return final_features
 
 
-def predict_best_answer(article, question, options):
-
-    results = {}
+def predict_best_answer(
+    article: str, question: str, options: Dict[str, str]
+) -> Tuple[str, float, Dict[str, float]]:
+    """
+    Predicts the best answer from a list of options using an ensemble of models.
+    """
+    results: Dict[str, float] = {}
 
     for label, option_text in options.items():
-
         features = prepare_features(
             article,
             question,
@@ -111,10 +103,7 @@ def predict_best_answer(article, question, options):
         # Simple ensemble score
         svm_score = 1 / (1 + np.exp(-svm_pred))
 
-        final_score = (
-            0.6 * lr_prob +
-            0.4 * svm_score
-        )
+        final_score = (LR_WEIGHT * lr_prob) + (SVM_WEIGHT * svm_score)
 
         results[label] = final_score
 
@@ -124,8 +113,8 @@ def predict_best_answer(article, question, options):
     return best_answer, confidence, results
 
 
-def main():
-
+def main() -> None:
+    """Main function to demonstrate the prediction pipeline."""
     article = """
     The Earth revolves around the Sun once every year.
     This movement causes seasons and changes in daylight.
