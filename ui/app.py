@@ -52,13 +52,14 @@ def build_options(row):
 def initialise_state():
     defaults = {
         "quiz_item": None,
-        "selected_answer": None,
-        "checked": False,
+        "selected_answers": {},
+        "checked_variants": {},
         "hint_count": 0,
         "history": [],
         "quiz_id": 0,
-        "logged_quiz_id": None,
+        "logged_attempt_keys": [],
         "use_generated_distractors": True,
+        "mcq_count": 3,
     }
 
     for key, value in defaults.items():
@@ -67,13 +68,13 @@ def initialise_state():
 
 
 def reset_quiz_state():
-    st.session_state.selected_answer = None
-    st.session_state.checked = False
+    st.session_state.selected_answers = {}
+    st.session_state.checked_variants = {}
     st.session_state.hint_count = 0
-    st.session_state.logged_quiz_id = None
+    st.session_state.logged_attempt_keys = []
 
 
-def normalise_distractors(distractors, correct_answer, fallback_options):
+def normalise_distractors(distractors, correct_answer, fallback_options, needed=3):
     correct_clean = str(correct_answer).strip().lower()
     fallback_values = [
         str(option).strip()
@@ -91,7 +92,7 @@ def normalise_distractors(distractors, correct_answer, fallback_options):
             continue
         cleaned.append(text)
         seen.add(key)
-        if len(cleaned) == 3:
+        if len(cleaned) == needed:
             break
 
     for item in fallback_values:
@@ -99,13 +100,13 @@ def normalise_distractors(distractors, correct_answer, fallback_options):
         if key not in seen:
             cleaned.append(item)
             seen.add(key)
-        if len(cleaned) == 3:
+        if len(cleaned) == needed:
             break
 
-    while len(cleaned) < 3:
+    while len(cleaned) < needed:
         cleaned.append("Distractor unavailable")
 
-    return cleaned[:3]
+    return cleaned[:needed]
 
 
 def build_display_options(quiz_item, use_generated_distractors=True):
@@ -135,16 +136,65 @@ def build_display_options(quiz_item, use_generated_distractors=True):
     return display_options, correct_label, source
 
 
+def build_mcq_variants(quiz_item, use_generated_distractors=True, variant_count=3):
+    correct_answer = str(quiz_item["correct_answer"]).strip()
+    labels = ["A", "B", "C", "D"]
+    variants = []
+
+    if use_generated_distractors:
+        pool = normalise_distractors(
+            quiz_item.get("generated_distractors", []),
+            correct_answer,
+            quiz_item["original_options"],
+            needed=max(3, variant_count * 3),
+        )
+        option_source = "Model B generated distractors"
+    else:
+        pool = [
+            str(option).strip()
+            for option in quiz_item["original_options"].values()
+            if str(option).strip().lower() != correct_answer.lower()
+        ]
+        option_source = "Original RACE options"
+
+    for idx in range(variant_count):
+        if use_generated_distractors:
+            start = idx * 3
+            distractors = pool[start:start + 3]
+            if len(distractors) < 3:
+                distractors = (distractors + pool)[:3]
+        else:
+            distractors = pool[:3]
+
+        option_texts = distractors + [correct_answer]
+        random.shuffle(option_texts)
+        display_options = dict(zip(labels, option_texts))
+        correct_label = next(
+            (label for label, text in display_options.items()
+             if str(text).strip().lower() == correct_answer.lower()),
+            labels[0],
+        )
+        variants.append({
+            "variant_index": idx,
+            "display_options": display_options,
+            "display_correct_label": correct_label,
+            "option_source": option_source,
+        })
+
+    return variants
+
+
 def prepare_quiz_item(article, question, options, correct_label):
     quiz_item = build_quiz_item(article, question, options, correct_label)
-    display_options, display_correct_label, option_source = build_display_options(
+    quiz_item["mcq_variants"] = build_mcq_variants(
         quiz_item,
         st.session_state.use_generated_distractors,
+        st.session_state.mcq_count,
     )
-
-    quiz_item["display_options"] = display_options
-    quiz_item["display_correct_label"] = display_correct_label
-    quiz_item["option_source"] = option_source
+    first_variant = quiz_item["mcq_variants"][0]
+    quiz_item["display_options"] = first_variant["display_options"]
+    quiz_item["display_correct_label"] = first_variant["display_correct_label"]
+    quiz_item["option_source"] = first_variant["option_source"]
     return quiz_item
 
 
@@ -168,25 +218,27 @@ def create_custom_quiz(article, question, options, correct_label):
     set_quiz_item(quiz_item)
 
 
-def append_attempt_once(selected_label, is_correct):
-    if st.session_state.logged_quiz_id == st.session_state.quiz_id:
+def append_attempt_once(variant, selected_label, is_correct):
+    attempt_key = f"{st.session_state.quiz_id}:{variant['variant_index']}"
+    if attempt_key in st.session_state.logged_attempt_keys:
         return
 
     quiz_item = st.session_state.quiz_item
-    selected_text = quiz_item["display_options"][selected_label]
+    selected_text = variant["display_options"][selected_label]
 
     st.session_state.history.append({
         "question": quiz_item["question"],
-        "option_source": quiz_item["option_source"],
+        "mcq_number": variant["variant_index"] + 1,
+        "option_source": variant["option_source"],
         "selected_label": selected_label,
         "selected_answer": selected_text,
-        "correct_label": quiz_item["display_correct_label"],
+        "correct_label": variant["display_correct_label"],
         "correct_answer": quiz_item["correct_answer"],
         "is_correct": is_correct,
         "model_a_prediction": quiz_item["model_a_prediction"],
         "model_a_confidence": quiz_item["model_a_confidence"],
     })
-    st.session_state.logged_quiz_id = st.session_state.quiz_id
+    st.session_state.logged_attempt_keys.append(attempt_key)
 
 
 def render_model_a_scores(quiz_item):
@@ -230,6 +282,14 @@ with tab1:
         "Use Model B generated distractors in the quiz",
         value=st.session_state.use_generated_distractors,
         help="When disabled, the quiz uses the original RACE answer options.",
+    )
+    st.session_state.mcq_count = st.number_input(
+        "Number of MCQ variants to generate for this question",
+        min_value=1,
+        max_value=5,
+        value=int(st.session_state.mcq_count),
+        step=1,
+        help="Each MCQ uses the same question and correct answer, but a separate shuffled option set.",
     )
 
     input_mode = st.radio(
@@ -333,9 +393,8 @@ with tab2:
         st.info("Load or create a quiz from the **Article Input** tab first.")
     else:
         q_num = st.session_state.quiz_id
-        st.caption(
-            f"Question #{q_num} · Options source: {quiz_item['option_source']}"
-        )
+        variants = quiz_item.get("mcq_variants", [])
+        st.caption(f"Question #{q_num} - {len(variants)} MCQ variant(s) generated")
 
         word_count = len(quiz_item["article"].split())
         with st.expander(f"Show Article ({word_count} words)", expanded=False):
@@ -348,43 +407,60 @@ with tab2:
             unsafe_allow_html=True,
         )
 
-        st.markdown("**Choose your answer:**")
-        display_options = quiz_item["display_options"]
-        labels = list(display_options.keys())
-        default_index = (
-            labels.index(st.session_state.selected_answer)
-            if st.session_state.selected_answer in labels
-            else None
-        )
+        st.markdown("**Choose your answers:**")
+        for variant in variants:
+            variant_index = variant["variant_index"]
+            selected_key = str(variant_index)
+            display_options = variant["display_options"]
+            labels = list(display_options.keys())
+            selected_answer = st.session_state.selected_answers.get(selected_key)
+            default_index = (
+                labels.index(selected_answer)
+                if selected_answer in labels
+                else None
+            )
 
-        selected = st.radio(
-            "Options",
-            labels,
-            index=default_index,
-            format_func=lambda label: f"{label}. {display_options[label]}",
-            key=f"answer_radio_{st.session_state.quiz_id}",
-            label_visibility="collapsed",
-        )
-        st.session_state.selected_answer = selected
-
-        check_disabled = st.session_state.checked or selected is None
-        if st.button("Check Answer", key="check_answer", disabled=check_disabled, type="primary"):
-            st.session_state.checked = True
-            is_correct = selected == quiz_item["display_correct_label"]
-            append_attempt_once(selected, is_correct)
-
-        if st.session_state.checked:
-            selected = st.session_state.selected_answer
-            is_correct = selected == quiz_item["display_correct_label"]
-
-            if is_correct:
-                st.success("Correct answer!")
-            else:
-                st.error(
-                    f"Incorrect. Correct answer is "
-                    f"{quiz_item['display_correct_label']}. {quiz_item['correct_answer']}"
+            with st.container(border=True):
+                st.markdown(
+                    f"**MCQ {variant_index + 1}**  \n"
+                    f"Options source: {variant['option_source']}"
                 )
+                selected = st.radio(
+                    f"Options for MCQ {variant_index + 1}",
+                    labels,
+                    index=default_index,
+                    format_func=lambda label: f"{label}. {display_options[label]}",
+                    key=f"answer_radio_{st.session_state.quiz_id}_{variant_index}",
+                    label_visibility="collapsed",
+                )
+                st.session_state.selected_answers[selected_key] = selected
 
+                already_checked = st.session_state.checked_variants.get(selected_key, False)
+                check_disabled = already_checked or selected is None
+                if st.button(
+                    f"Check MCQ {variant_index + 1}",
+                    key=f"check_answer_{st.session_state.quiz_id}_{variant_index}",
+                    disabled=check_disabled,
+                    type="primary",
+                ):
+                    is_correct = selected == variant["display_correct_label"]
+                    st.session_state.checked_variants[selected_key] = True
+                    append_attempt_once(variant, selected, is_correct)
+                    st.rerun()
+
+                if st.session_state.checked_variants.get(selected_key, False):
+                    selected = st.session_state.selected_answers.get(selected_key)
+                    is_correct = selected == variant["display_correct_label"]
+
+                    if is_correct:
+                        st.success("Correct answer!")
+                    else:
+                        st.error(
+                            f"Incorrect. Correct answer is "
+                            f"{variant['display_correct_label']}. {quiz_item['correct_answer']}"
+                        )
+
+        if any(st.session_state.checked_variants.values()):
             model_agrees = quiz_item["model_a_prediction"] == quiz_item["correct_label"]
             st.info(
                 f"Model A predicted original RACE option **{quiz_item['model_a_prediction']}** "
@@ -397,7 +473,7 @@ with tab2:
                 render_model_a_scores(quiz_item)
 
             st.divider()
-            if st.button("Next Random Question →", key="next_question_btn", type="primary"):
+            if st.button("Next Random Question ->", key="next_question_btn", type="primary"):
                 with st.spinner("Generating next quiz..."):
                     try:
                         create_quiz_from_row(get_random_sample(df))
@@ -501,6 +577,7 @@ with tab4:
         st.subheader("Session History")
         history_df = pd.DataFrame(st.session_state.history).rename(columns={
             "question": "Question",
+            "mcq_number": "MCQ #",
             "option_source": "Option Source",
             "selected_label": "Your Label",
             "selected_answer": "Your Answer",

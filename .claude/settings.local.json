@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import pandas as pd; df = pd.read_csv\\(r'c:\\\\Users\\\\Shehryar Faisal\\\\Desktop\\\\AI_Proj\\\\Intelligent-Reading-Comprehension-and-Quiz-Generation-System-using-Machine-Learning-Neural-Networks\\\\data\\\\raw\\\\dev.csv'\\); print\\('dev.csv rows:', len\\(df\\)\\)\")"
+    ]
+  }
+}

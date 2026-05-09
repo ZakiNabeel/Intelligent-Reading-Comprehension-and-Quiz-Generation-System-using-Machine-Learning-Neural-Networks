@@ -51,7 +51,8 @@ def build_quiz_item(article, question, options, correct_label):
 
     distractors = generate_distractors(
         article,
-        correct_answer
+        correct_answer,
+        top_k=12
     )
 
     hints = generate_hints(
