@@ -9,3 +9,4 @@ __pycache__/
 data/raw/*.csv
 data/processed/*.csv
 models/model_a/traditional/*.pkl
+models/model_b/traditional/*.pkl
