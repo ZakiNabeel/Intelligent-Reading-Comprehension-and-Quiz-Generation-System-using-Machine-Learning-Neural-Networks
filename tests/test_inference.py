@@ -237,6 +237,17 @@ class TestModelAInference(unittest.TestCase):
         self.assertIn(best, SAMPLE_OPTIONS.keys())
         self.assertIsInstance(conf, float)
 
+    def test_nan_text_inputs_do_not_crash(self):
+        import math
+        best, conf, scores = self.inf.predict_best_answer(
+            SAMPLE_ARTICLE,
+            math.nan,
+            {"A": "The Moon", "B": math.nan, "C": CORRECT_ANSWER, "D": "Mars"},
+        )
+        self.assertIn(best, {"A", "B", "C", "D"})
+        self.assertIsInstance(conf, float)
+        self.assertEqual(set(scores.keys()), {"A", "B", "C", "D"})
+
 
 @SKIP_IF_NO_MODELS
 class TestModelBInferenceReal(unittest.TestCase):
@@ -349,6 +360,23 @@ class TestEvaluationUtils(unittest.TestCase):
         self.assertAlmostEqual(result["user_accuracy"], 2 / 3)
         self.assertAlmostEqual(result["model_a_accuracy"], 2 / 3)
         self.assertEqual(result["total_attempts"], 3)
+
+    def test_question_text_metrics_include_meteor(self):
+        result = self.ev.evaluate_question_text_metrics(
+            ["What does Earth revolve around?"],
+            ["What does the Earth revolve around?"],
+        )
+        for key in ["bleu", "rouge_l", "meteor"]:
+            self.assertIn(key, result.columns)
+            self.assertGreaterEqual(float(result.iloc[0][key]), 0.0)
+            self.assertLessEqual(float(result.iloc[0][key]), 1.0)
+
+    def test_meteor_identical_question_is_high(self):
+        score = self.ev.compute_meteor(
+            "What does Earth revolve around?",
+            "What does Earth revolve around?",
+        )
+        self.assertGreater(score, 0.9)
 
 
 if __name__ == "__main__":

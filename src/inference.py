@@ -1,5 +1,6 @@
 import joblib
 import numpy as np
+import pandas as pd
 
 from typing import Dict, Tuple
 from pathlib import Path
@@ -22,13 +23,26 @@ LR_WEIGHT  = 0.6   # Logistic Regression contributes 60% — it provides calibra
 SVM_WEIGHT = 0.4   # SVM contributes 40% — it provides a hard margin discriminant score.
 
 
+def safe_text(value) -> str:
+    """Convert missing pandas/NumPy values into strings accepted by TF-IDF."""
+    if value is None or pd.isna(value):
+        return ""
+    return str(value)
+
+
 def build_combined_text(article: str, question: str, option_text: str) -> str:
     # Article is duplicated so TF-IDF weights passage vocabulary more heavily.
+    article = safe_text(article)
+    question = safe_text(question)
+    option_text = safe_text(option_text)
     return f"{article} {article} {question} {option_text}"
 
 
 def compute_cosine_features(article: str, question: str, option_text: str) -> np.ndarray:
     """Return shape (1, 3): [sim(q,opt), sim(art,opt), sim(art,q)]."""
+    article = safe_text(article)
+    question = safe_text(question)
+    option_text = safe_text(option_text)
     vecs = vectorizer.transform([article, question, option_text])
     article_vec, question_vec, option_vec = vecs[0], vecs[1], vecs[2]
 
@@ -41,6 +55,9 @@ def compute_cosine_features(article: str, question: str, option_text: str) -> np
 
 def prepare_features(article: str, question: str, option_text: str) -> csr_matrix:
     """Concatenate TF-IDF sparse vector with 3 cosine similarity features."""
+    article = safe_text(article)
+    question = safe_text(question)
+    option_text = safe_text(option_text)
     tfidf_features  = vectorizer.transform([build_combined_text(article, question, option_text)])
     cosine_features = compute_cosine_features(article, question, option_text)
     return hstack([tfidf_features, cosine_features])
@@ -56,6 +73,9 @@ def predict_best_answer(
     both models contribute scores in [0, 1] before the weighted average.
     """
     results: Dict[str, float] = {}
+    article = safe_text(article)
+    question = safe_text(question)
+    options = {str(label): safe_text(option_text) for label, option_text in options.items()}
 
     for label, option_text in options.items():
         features = prepare_features(article, question, option_text)

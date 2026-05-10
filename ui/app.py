@@ -32,8 +32,8 @@ _missing_models = [str(p) for p in _REQUIRED_MODELS if not p.exists()]
 def _import_quiz_pipeline():
     """Import quiz_pipeline only after confirming model files exist."""
     try:
-        from quiz_pipeline import build_quiz_item
-        return build_quiz_item
+        from quiz_pipeline import build_generated_quiz_items, build_quiz_item
+        return build_quiz_item, build_generated_quiz_items
     except Exception as exc:
         return exc
 
@@ -58,21 +58,38 @@ def load_dataset(split: str = "dev") -> pd.DataFrame:
 
 
 def get_random_sample(df: pd.DataFrame):
-    return df.iloc[random.randint(0, len(df) - 1)]
+    valid_df = get_valid_samples(df)
+    if valid_df.empty:
+        raise ValueError("No valid RACE samples found; article, question, options, and answer are required.")
+    return valid_df.iloc[random.randint(0, len(valid_df) - 1)]
 
 
 def get_sample_by_index(df: pd.DataFrame, index: int):
     return df.iloc[index]
 
 
+def get_valid_samples(df: pd.DataFrame) -> pd.DataFrame:
+    required = ["article", "question", "A", "B", "C", "D", "answer"]
+    valid = df.dropna(subset=required)
+    valid = valid[valid["answer"].isin(["A", "B", "C", "D"])]
+    return valid
+
+
 def build_options(row) -> dict:
-    return {"A": row["A"], "B": row["B"], "C": row["C"], "D": row["D"]}
+    return {
+        "A": "" if pd.isna(row["A"]) else str(row["A"]),
+        "B": "" if pd.isna(row["B"]) else str(row["B"]),
+        "C": "" if pd.isna(row["C"]) else str(row["C"]),
+        "D": "" if pd.isna(row["D"]) else str(row["D"]),
+    }
 
 
 # ── Session state initialisation ───────────────────────────────────────────────
 def initialise_state():
     defaults = {
         "quiz_item": None,
+        "quiz_items": [],
+        "quiz_set_index": 0,
         "selected_answers": {},
         "checked_variants": {},
         "hint_count": 0,
@@ -80,7 +97,7 @@ def initialise_state():
         "quiz_id": 0,
         "logged_attempt_keys": [],
         "use_generated_distractors": True,
-        "mcq_count": 3,
+        "mcq_count": 1,
         "inference_latencies": [],
     }
     for key, value in defaults.items():
@@ -159,18 +176,20 @@ def build_display_options(quiz_item: dict, use_generated_distractors: bool = Tru
 
 
 def build_mcq_variants(
-    quiz_item: dict, use_generated_distractors: bool = True, variant_count: int = 3
+    quiz_item: dict, use_generated_distractors: bool = True, variant_count: int = 1
 ) -> list:
+    """Build exactly one answer-option set for one question."""
     correct_answer = str(quiz_item["correct_answer"]).strip()
     labels = ["A", "B", "C", "D"]
     variants = []
+    variant_count = 1
 
     if use_generated_distractors:
         pool = normalise_distractors(
             quiz_item.get("generated_distractors", []),
             correct_answer,
             quiz_item["original_options"],
-            needed=max(3, variant_count * 3),
+            needed=3,
         )
         option_source = "Model B generated distractors"
     else:
@@ -218,10 +237,15 @@ def prepare_quiz_item(
     quiz_item = _build_quiz_item(article, question, options, correct_label)
     latency = time.time() - t0
     st.session_state.inference_latencies.append(latency)
+    return enrich_quiz_item(quiz_item)
+
+
+def enrich_quiz_item(quiz_item: dict) -> dict:
+    """Attach UI display options to one quiz item without creating duplicates."""
     quiz_item["mcq_variants"] = build_mcq_variants(
         quiz_item,
         st.session_state.use_generated_distractors,
-        st.session_state.mcq_count,
+        1,
     )
     first = quiz_item["mcq_variants"][0]
     quiz_item["display_options"] = first["display_options"]
@@ -231,7 +255,28 @@ def prepare_quiz_item(
 
 
 def set_quiz_item(quiz_item: dict):
+    st.session_state.quiz_items = [quiz_item]
+    st.session_state.quiz_set_index = 0
     st.session_state.quiz_item = quiz_item
+    st.session_state.quiz_id += 1
+    reset_quiz_state()
+
+
+def set_quiz_items(quiz_items: list):
+    st.session_state.quiz_items = quiz_items
+    st.session_state.quiz_set_index = 0
+    st.session_state.quiz_item = quiz_items[0] if quiz_items else None
+    st.session_state.quiz_id += 1
+    reset_quiz_state()
+
+
+def select_quiz_item(index: int):
+    """Switch between distinct generated questions from the same article."""
+    quiz_items = st.session_state.quiz_items
+    if not quiz_items:
+        return
+    st.session_state.quiz_set_index = max(0, min(index, len(quiz_items) - 1))
+    st.session_state.quiz_item = quiz_items[st.session_state.quiz_set_index]
     st.session_state.quiz_id += 1
     reset_quiz_state()
 
@@ -248,6 +293,14 @@ def create_custom_quiz(
 ):
     quiz_item = prepare_quiz_item(article, question, options, correct_label)
     set_quiz_item(quiz_item)
+
+
+def create_generated_quizzes(article: str, top_k: int = 5):
+    t0 = time.time()
+    quiz_items = _build_generated_quiz_items(article, top_k=top_k)
+    st.session_state.inference_latencies.append(time.time() - t0)
+    quiz_items = [enrich_quiz_item(item) for item in quiz_items]
+    set_quiz_items(quiz_items)
 
 
 # ── History helper ─────────────────────────────────────────────────────────────
@@ -317,13 +370,15 @@ if _missing_models:
     st.stop()
 
 # ── Import quiz pipeline after model check ─────────────────────────────────────
-_build_quiz_item = _import_quiz_pipeline()
-if isinstance(_build_quiz_item, Exception):
+_pipeline_import = _import_quiz_pipeline()
+if isinstance(_pipeline_import, Exception):
     st.error(
-        f"**Failed to load quiz pipeline:** {_build_quiz_item}\n\n"
+        f"**Failed to load quiz pipeline:** {_pipeline_import}\n\n"
         "Make sure all model files are present and dependencies are installed."
     )
     st.stop()
+
+_build_quiz_item, _build_generated_quiz_items = _pipeline_import
 
 # ── Load dataset with a clear error if missing ────────────────────────────────
 try:
@@ -352,28 +407,14 @@ with tab1:
         "Choose how to load an article, then head to the **Quiz** tab to answer."
     )
 
-    col_settings_a, col_settings_b = st.columns(2)
-    with col_settings_a:
-        st.session_state.use_generated_distractors = st.checkbox(
-            "Use Model B generated distractors",
-            value=st.session_state.use_generated_distractors,
-            help=(
-                "When enabled, wrong answer options are generated by Model B from the article text. "
-                "When disabled, the original RACE answer options are used."
-            ),
-        )
-    with col_settings_b:
-        st.session_state.mcq_count = st.number_input(
-            "MCQ variants per question",
-            min_value=1,
-            max_value=5,
-            value=int(st.session_state.mcq_count),
-            step=1,
-            help=(
-                "Each variant uses the same question and correct answer, "
-                "but a different shuffled set of distractors."
-            ),
-        )
+    st.session_state.use_generated_distractors = st.checkbox(
+        "Use Model B generated distractors",
+        value=st.session_state.use_generated_distractors,
+        help=(
+            "When enabled, wrong answer options are generated by Model B from the article text. "
+            "When disabled, the original RACE answer options are used."
+        ),
+    )
 
     st.divider()
 
@@ -427,7 +468,35 @@ with tab1:
             "Model A will predict the correct answer and Model B will generate hints."
         )
         article = st.text_area("Article:", height=250, placeholder="Paste your reading passage here…")
-        question = st.text_input("Question:", placeholder="Enter the comprehension question…")
+        generated_count = st.number_input(
+            "Generated questions from this article",
+            min_value=1,
+            max_value=10,
+            value=5,
+            step=1,
+            help="Creates distinct template-based questions from the article instead of shuffled variants.",
+        )
+        if st.button("Generate Article MCQs", key="generate_custom_questions", type="primary"):
+            if not str(article).strip():
+                st.error("Please paste an article first.")
+            else:
+                with st.spinner("Generating template-based MCQs"):
+                    try:
+                        create_generated_quizzes(article, top_k=int(generated_count))
+                        if st.session_state.quiz_item is None:
+                            st.warning("No generated questions were produced for this article.")
+                        else:
+                            st.success(
+                                f"Generated {len(st.session_state.quiz_items)} distinct MCQ(s). "
+                                "Head to the **Quiz** tab to answer."
+                            )
+                    except Exception as exc:
+                        st.error(f"Could not generate MCQs: {exc}")
+                        st.exception(exc)
+
+        st.divider()
+        st.caption("Or provide one manual MCQ for this article.")
+        question = st.text_input("Question:", placeholder="Enter the comprehension question")
 
         col1, col2 = st.columns(2)
         with col1:
@@ -486,7 +555,29 @@ with tab2:
     else:
         q_num = st.session_state.quiz_id
         variants = quiz_item.get("mcq_variants", [])
-        st.caption(f"Question #{q_num}  ·  {len(variants)} MCQ variant(s)")
+        quiz_items = st.session_state.quiz_items
+        set_index = st.session_state.quiz_set_index
+        if len(quiz_items) > 1:
+            st.caption(f"Generated question {set_index + 1} of {len(quiz_items)}")
+            nav_prev, nav_next = st.columns(2)
+            if nav_prev.button(
+                "Previous Question",
+                key=f"prev_generated_{st.session_state.quiz_id}",
+                disabled=set_index <= 0,
+                use_container_width=True,
+            ):
+                select_quiz_item(set_index - 1)
+                st.rerun()
+            if nav_next.button(
+                "Next Question",
+                key=f"next_generated_{st.session_state.quiz_id}",
+                disabled=set_index >= len(quiz_items) - 1,
+                use_container_width=True,
+            ):
+                select_quiz_item(set_index + 1)
+                st.rerun()
+        else:
+            st.caption(f"Question #{q_num}")
 
         word_count = len(quiz_item["article"].split())
         with st.expander(f"Show Article ({word_count} words)", expanded=False):
@@ -499,7 +590,7 @@ with tab2:
             unsafe_allow_html=True,
         )
 
-        st.markdown("**Choose your answer for each variant:**")
+        st.markdown("**Choose your answer:**")
         for variant in variants:
             variant_index = variant["variant_index"]
             selected_key = str(variant_index)
@@ -512,13 +603,13 @@ with tab2:
 
             with st.container(border=True):
                 st.markdown(
-                    f"**Variant {variant_index + 1}**  "
+                    f"**Answer Options**  "
                     f"<span style='color:#888;font-size:0.85em'>"
                     f"({variant['option_source']})</span>",
                     unsafe_allow_html=True,
                 )
                 selected = st.radio(
-                    f"Options for Variant {variant_index + 1}",
+                    "Options",
                     labels,
                     index=default_index,
                     format_func=lambda lbl: f"{lbl}. {display_options[lbl]}",

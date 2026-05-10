@@ -10,6 +10,7 @@ Covers:
 import numpy as np
 import pandas as pd
 from pathlib import Path
+from collections import Counter
 
 from sklearn.metrics import (
     accuracy_score,
@@ -39,6 +40,145 @@ def _print_divider(label):
     print(f"\n{'=' * 60}")
     print(f"  {label}")
     print('=' * 60)
+
+
+def _tokenize_for_text_metric(text):
+    """Tokenize text for BLEU, ROUGE-L, and METEOR style metrics."""
+    import re
+    return re.findall(r"[a-z0-9]+", str(text).lower())
+
+
+def _safe_divide(numerator, denominator):
+    """Avoid zero-division in text metrics."""
+    return numerator / denominator if denominator else 0.0
+
+
+def compute_bleu(reference, hypothesis):
+    """
+    Compute sentence BLEU.
+
+    Uses NLTK when available, with a small unigram BLEU fallback so evaluation
+    still produces a score without optional packages.
+    """
+    ref_tokens = _tokenize_for_text_metric(reference)
+    hyp_tokens = _tokenize_for_text_metric(hypothesis)
+    if not ref_tokens or not hyp_tokens:
+        return 0.0
+
+    try:
+        from nltk.translate.bleu_score import SmoothingFunction, sentence_bleu
+
+        return float(
+            sentence_bleu(
+                [ref_tokens],
+                hyp_tokens,
+                smoothing_function=SmoothingFunction().method1,
+            )
+        )
+    except Exception:
+        ref_counts = Counter(ref_tokens)
+        hyp_counts = Counter(hyp_tokens)
+        overlap = sum(min(count, ref_counts[token]) for token, count in hyp_counts.items())
+        precision = _safe_divide(overlap, len(hyp_tokens))
+        brevity_penalty = min(1.0, np.exp(1 - _safe_divide(len(ref_tokens), len(hyp_tokens))))
+        return float(brevity_penalty * precision)
+
+
+def compute_rouge_l(reference, hypothesis):
+    """
+    Compute ROUGE-L F1 using longest common subsequence.
+
+    This implementation has no external dependency.
+    """
+    ref_tokens = _tokenize_for_text_metric(reference)
+    hyp_tokens = _tokenize_for_text_metric(hypothesis)
+    if not ref_tokens or not hyp_tokens:
+        return 0.0
+
+    prev = [0] * (len(hyp_tokens) + 1)
+    for ref_token in ref_tokens:
+        curr = [0]
+        for idx, hyp_token in enumerate(hyp_tokens, start=1):
+            if ref_token == hyp_token:
+                curr.append(prev[idx - 1] + 1)
+            else:
+                curr.append(max(prev[idx], curr[-1]))
+        prev = curr
+
+    lcs = prev[-1]
+    precision = _safe_divide(lcs, len(hyp_tokens))
+    recall = _safe_divide(lcs, len(ref_tokens))
+    return float(_safe_divide(2 * precision * recall, precision + recall))
+
+
+def compute_meteor(reference, hypothesis):
+    """
+    Compute METEOR.
+
+    Uses NLTK METEOR when available. If NLTK or its WordNet resources are not
+    installed, falls back to the standard METEOR-style harmonic mean with
+    exact-token overlap and fragmentation penalty.
+    """
+    ref_tokens = _tokenize_for_text_metric(reference)
+    hyp_tokens = _tokenize_for_text_metric(hypothesis)
+    if not ref_tokens or not hyp_tokens:
+        return 0.0
+
+    try:
+        from nltk.translate.meteor_score import meteor_score
+
+        return float(meteor_score([ref_tokens], hyp_tokens))
+    except Exception:
+        ref_counts = Counter(ref_tokens)
+        matches = []
+        used_ref_positions = set()
+        for hyp_index, token in enumerate(hyp_tokens):
+            if ref_counts[token] <= 0:
+                continue
+            for ref_index, ref_token in enumerate(ref_tokens):
+                if ref_index not in used_ref_positions and token == ref_token:
+                    used_ref_positions.add(ref_index)
+                    ref_counts[token] -= 1
+                    matches.append((hyp_index, ref_index))
+                    break
+
+        match_count = len(matches)
+        if match_count == 0:
+            return 0.0
+
+        precision = _safe_divide(match_count, len(hyp_tokens))
+        recall = _safe_divide(match_count, len(ref_tokens))
+        f_mean = _safe_divide(10 * precision * recall, recall + 9 * precision)
+
+        matches.sort()
+        chunks = 1
+        for idx in range(1, len(matches)):
+            prev_hyp, prev_ref = matches[idx - 1]
+            curr_hyp, curr_ref = matches[idx]
+            if curr_hyp != prev_hyp + 1 or curr_ref != prev_ref + 1:
+                chunks += 1
+
+        penalty = 0.5 * (_safe_divide(chunks, match_count) ** 3)
+        return float((1 - penalty) * f_mean)
+
+
+def evaluate_question_text_metrics(reference_questions, generated_questions):
+    """
+    Evaluate generated questions with BLEU, ROUGE-L, and METEOR.
+
+    Returns a DataFrame with per-question scores plus the generated/reference
+    text, so it can be saved or averaged by callers.
+    """
+    rows = []
+    for reference, generated in zip(reference_questions, generated_questions):
+        rows.append({
+            "reference_question": reference,
+            "generated_question": generated,
+            "bleu": compute_bleu(reference, generated),
+            "rouge_l": compute_rouge_l(reference, generated),
+            "meteor": compute_meteor(reference, generated),
+        })
+    return pd.DataFrame(rows)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

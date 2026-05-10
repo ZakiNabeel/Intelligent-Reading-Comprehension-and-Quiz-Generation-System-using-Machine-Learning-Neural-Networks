@@ -1,0 +1,5 @@
+sample_index,rank,reference_question,generated_question,bleu,rouge_l,meteor
+0,1,"Before the writer came to the high school summer camp,he was a (n)   _  .","What did Actually, the boy didn't need?",0.013120543279239774,0.09090909090909091,0.03731343283582089
+0,2,"Before the writer came to the high school summer camp,he was a (n)   _  .",What was That evening I?,0.008881260752338875,0.10526315789473682,0.038167938931297704
+1,1,How many times did the writer invite the boy to join in the activities?,"What did Actually, the boy didn't need?",0.03070662829160023,0.2727272727272727,0.11194029850746268
+1,2,How many times did the writer invite the boy to join in the activities?,What was That evening I?,0.0,0.0,0.0
