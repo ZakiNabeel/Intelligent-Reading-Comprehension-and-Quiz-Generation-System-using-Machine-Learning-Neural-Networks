@@ -1,0 +1,492 @@
+% ============================================================
+% AL2002 Final Project Report
+% Intelligent Reading Comprehension & Quiz Generation System
+% ============================================================
+\documentclass[12pt,a4paper]{article}
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{hyperref}
+\usepackage{amsmath}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{float}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{setspace}
+\onehalfspacing
+
+\definecolor{codeblue}{rgb}{0.0,0.3,0.6}
+\lstset{
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{codeblue}\bfseries,
+  commentstyle=\color{gray},
+  stringstyle=\color{orange!70!black},
+  breaklines=true,
+  frame=single,
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+}
+
+\title{
+  \textbf{Intelligent Reading Comprehension \&\\Quiz Generation System}\\[0.5em]
+  \large AL2002 Final Project Report
+}
+\author{Zakin Nabeel}
+\date{May 2026}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{Project Overview}
+% ============================================================
+
+This project implements a classical machine-learning pipeline for reading
+comprehension and automatic multiple-choice question (MCQ) generation using
+the RACE dataset~\cite{lai2017race}.
+The system consists of two cooperating models:
+
+\begin{itemize}
+  \item \textbf{Model A} — Answer verification: given a passage, a question,
+        and four candidate options, predict which option is correct.
+  \item \textbf{Model B} — Distractor and hint generation: given a passage
+        and the correct answer, generate three plausible wrong options
+        (distractors) and ranked passage-level hints.
+\end{itemize}
+
+A Streamlit web UI ties both models into an interactive quiz application.
+All modelling is done with scikit-learn; no deep learning or GPU is required.
+
+% ============================================================
+\section{Dataset}
+% ============================================================
+
+\subsection{RACE Dataset}
+
+RACE (Reading Comprehension from Examinations) is collected from Chinese
+middle-school and high-school English exams~\cite{lai2017race}.
+
+\begin{table}[H]
+\centering
+\caption{RACE Dataset Statistics}
+\begin{tabular}{lrr}
+  \toprule
+  \textbf{Property} & \textbf{Value} \\
+  \midrule
+  Total questions       & $\sim$88,000 \\
+  Unique passages       & $\sim$28,000 \\
+  Options per question  & 4 (A, B, C, D) \\
+  Answer type           & Single correct option \\
+  Source                & Chinese school English exams \\
+  Avg.\ article length  & 275 words \\
+  \bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Data Splits}
+
+\begin{table}[H]
+\centering
+\caption{Dataset Splits Used in Training}
+\begin{tabular}{lrrr}
+  \toprule
+  \textbf{Split} & \textbf{Rows} & \textbf{Unique Articles} & \textbf{Avg.\ Article Words} \\
+  \midrule
+  Train & 87,866 & 25,135 & 275.0 \\
+  Dev   & 87,866 & 25,135 & 275.0 \\
+  Test  & 87,866 & 25,135 & 275.0 \\
+  \bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Class Imbalance}
+
+Each MCQ produces four binary rows (one correct, three incorrect), giving a
+3:1 class imbalance ($\text{label}=0 : \text{label}=1 = 15000 : 5000$).
+All supervised classifiers use \texttt{class\_weight=`balanced'} to compensate.
+
+% ============================================================
+\section{Exploratory Data Analysis}
+% ============================================================
+
+\subsection{Answer Distribution}
+
+\begin{figure}[H]
+  \centering
+  % Replace with actual screenshot from notebook cell eda_answer_dist
+  \fbox{\includegraphics[width=0.85\textwidth]{screenshots/eda_answer_dist.png}}
+  \caption{Answer label distribution across train, dev, and test splits.
+           Labels A--D are approximately balanced ($\sim$25\% each).}
+  \label{fig:answer_dist}
+\end{figure}
+
+\subsection{Article and Question Length}
+
+\begin{figure}[H]
+  \centering
+  \fbox{\includegraphics[width=0.85\textwidth]{screenshots/eda_text_len.png}}
+  \caption{Distribution of article lengths (left) and question lengths (right)
+           in the training split.  The red dashed line marks the mean.}
+  \label{fig:text_len}
+\end{figure}
+
+\subsection{Option Length: Correct vs Incorrect}
+
+\begin{figure}[H]
+  \centering
+  \fbox{\includegraphics[width=0.55\textwidth]{screenshots/eda_option_len.png}}
+  \caption{Box-plot of option word count for correct (1) vs incorrect (0) options.
+           Correct options tend to be slightly longer, providing a weak signal.}
+  \label{fig:option_len}
+\end{figure}
+
+% ============================================================
+\section{Statistical Analysis}
+% ============================================================
+
+\subsection{Cosine Similarity as a Discriminating Feature}
+
+We computed TF-IDF cosine similarity between each answer option and the
+passage for 500 training samples.
+
+\begin{figure}[H]
+  \centering
+  \fbox{\includegraphics[width=0.75\textwidth]{screenshots/stat_cosine.png}}
+  \caption{Distribution of cosine similarity (option vs.\ article).
+           Correct options (green) have higher similarity than incorrect options (red).}
+  \label{fig:cosine_dist}
+\end{figure}
+
+\subsection{Statistical Significance (t-test)}
+
+\begin{table}[H]
+\centering
+\caption{Independent two-sample t-test: correct vs incorrect option cosine similarity}
+\begin{tabular}{lr}
+  \toprule
+  \textbf{Statistic} & \textbf{Value} \\
+  \midrule
+  t-statistic & 2.4300 \\
+  p-value     & $1.52 \times 10^{-2}$ \\
+  Significant ($p < 0.05$)? & \textbf{Yes} \\
+  \bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Interpretation:} TF-IDF cosine similarity to the passage is a
+statistically significant discriminating feature for answer verification.
+
+% ============================================================
+\section{Feature Engineering}
+% ============================================================
+
+Each sample (article, question, one option) is represented as a concatenation
+of:
+
+\begin{enumerate}
+  \item \textbf{TF-IDF vector} (15,000 features, unigrams + bigrams) of the
+        combined text \texttt{[article $\times$2, question, option]}.
+        The article is repeated to up-weight passage vocabulary.
+  \item \textbf{Three cosine similarity scores}:
+        \begin{itemize}
+          \item $\text{sim}(\text{question}, \text{option})$
+          \item $\text{sim}(\text{article}, \text{option})$ — the key signal
+          \item $\text{sim}(\text{article}, \text{question})$
+        \end{itemize}
+\end{enumerate}
+
+Final feature matrix shape: $(N, 15003)$ — 15,000 TF-IDF + 3 cosine.
+
+% ============================================================
+\section{Model A: Answer Verification}
+% ============================================================
+
+\subsection{Model Selection Rationale}
+
+\begin{table}[H]
+\centering
+\caption{Model A — Model Selection Rationale}
+\begin{tabular}{lp{9cm}}
+  \toprule
+  \textbf{Model} & \textbf{Why chosen} \\
+  \midrule
+  Logistic Regression  & Fast, probabilistic (calibrated confidence scores), linear on TF-IDF \\
+  Linear SVM           & Strong generalisation on high-dim sparse text, handles imbalance well \\
+  Label Propagation    & Semi-supervised: exploits unlabelled examples via k-NN label spreading \\
+  KMeans ($k=2$)       & Unsupervised baseline: clusters options without labels \\
+  GMM (diag)           & Probabilistic unsupervised clustering with soft cluster assignments \\
+  \textbf{MLP Shallow} & Neural network baseline: Dense(256, ReLU) to test non-linear gain \\
+  \textbf{MLP Deep}    & Deeper neural net: Dense(512)→Dense(256)→Dense(128) \\
+  \bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Training Details}
+
+\begin{itemize}
+  \item \textbf{Training samples:} 5,000 MCQs $\to$ 20,000 binary rows
+  \item \textbf{Logistic Regression:} GridSearchCV over $C \in \{0.1, 1, 5\}$,
+        3-fold CV; best $C = 0.1$, CV F1 = 0.5167
+  \item \textbf{SVM:} \texttt{LinearSVC}, \texttt{class\_weight=`balanced'}
+  \item \textbf{Label Propagation:} 3,000-sample subset, 30\% labels masked,
+        \texttt{kernel=`knn'}, \texttt{n\_neighbors=7}
+  \item \textbf{KMeans/GMM:} 3,000-sample dense subset, \texttt{n\_components=2}
+  \item \textbf{MLP:} Adam optimiser, early stopping, 10\% validation fraction
+\end{itemize}
+
+\subsection{Evaluation Results}
+
+\begin{table}[H]
+\centering
+\caption{Model A — Performance on Dev Set (4,000 samples)}
+\begin{tabular}{lrrl}
+  \toprule
+  \textbf{Model} & \textbf{Accuracy} & \textbf{Macro F1} & \textbf{Type} \\
+  \midrule
+  Logistic Regression     & 0.5733 & 0.5222 & Classical ML \\
+  Linear SVM              & 0.6040 & 0.5594 & Classical ML \\
+  Label Propagation       & 0.7771 & 0.5904 & Semi-supervised \\
+  MLP Shallow (256)       & 0.6125 & 0.5681 & Neural Network \\
+  MLP Deep (512-256-128)  & 0.6083 & 0.5643 & Neural Network \\
+  KMeans ($k=2$)          & N/A    & 0.0037$^\dagger$ & Unsupervised \\
+  GMM (diag, $k=2$)       & N/A    & 0.0037$^\dagger$ & Unsupervised \\
+  \midrule
+  Random baseline         & 0.2500 & 0.2500 & — \\
+  \bottomrule
+  \multicolumn{4}{l}{$\dagger$ Silhouette score (not F1).}
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]
+  \centering
+  \fbox{\includegraphics[width=0.85\textwidth]{screenshots/bar_compare.png}}
+  \caption{Accuracy and Macro F1 for classical ML models.}
+  \label{fig:bar_compare}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \fbox{\includegraphics[width=0.85\textwidth]{screenshots/nn_vs_classical.png}}
+  \caption{Classical ML vs Neural Network comparison.  MLP Shallow marginally
+           outperforms Linear SVM, but the gap is $<1\%$.}
+  \label{fig:nn_compare}
+\end{figure}
+
+\subsection{Confusion Matrices}
+
+\begin{figure}[H]
+  \centering
+  \fbox{\includegraphics[width=0.85\textwidth]{screenshots/confusion_matrices.png}}
+  \caption{Confusion matrices for Logistic Regression (left) and Linear SVM (right).
+           Both models recall $\sim$50--57\% of correct options (class 1).}
+  \label{fig:confusion}
+\end{figure}
+
+\subsection{ROC Curve}
+
+\begin{figure}[H]
+  \centering
+  \fbox{\includegraphics[width=0.55\textwidth]{screenshots/roc_curve.png}}
+  \caption{ROC curve for Logistic Regression (AUC = 0.5628).
+           The curve above the diagonal confirms the model learns a signal
+           beyond random guessing.}
+  \label{fig:roc}
+\end{figure}
+
+\subsection{Neural Network vs Classical ML — Analysis}
+
+\begin{table}[H]
+\centering
+\caption{Neural Network vs Classical ML — Key Findings}
+\begin{tabular}{p{4.5cm}p{9cm}}
+  \toprule
+  \textbf{Finding} & \textbf{Explanation} \\
+  \midrule
+  MLP Shallow $\approx$ SVM & Sparse TF-IDF features have limited non-linear structure;
+    a single hidden layer adds $<1\%$ accuracy. \\
+  MLP Deep $<$ MLP Shallow & Adding depth hurts: high-dimensional sparse input
+    causes overfitting without regularisation. \\
+  Label Propagation wins & Semi-supervised learning exploits the unlabelled pool,
+    giving a $+17\%$ accuracy advantage over Linear SVM. \\
+  All beat random (25\%) & TF-IDF cosine similarity to the passage is a real signal. \\
+  No BERT needed here & Transformers would achieve $\sim$70--80\% but require GPU
+    and are outside the classical-ML scope of this project. \\
+  \bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Ensemble Inference}
+
+At inference time, each option receives an ensemble score:
+\[
+  \text{score}(\text{opt}) = 0.6 \cdot P_{\text{LR}}(\text{correct}) +
+  0.4 \cdot \sigma\!\left(f_{\text{SVM}}(\text{opt})\right)
+\]
+where $\sigma$ is the sigmoid function applied to the SVM decision function.
+The option with the highest score is predicted as the answer.
+
+Demo results on 5 random dev samples:
+\begin{table}[H]
+\centering
+\caption{Ensemble Inference Demo (5 samples, seed 99)}
+\begin{tabular}{lcccr}
+  \toprule
+  \textbf{Question (truncated)} & \textbf{Pred.} & \textbf{Gold} & \textbf{Correct?} & \textbf{Latency} \\
+  \midrule
+  What is important for an English learner? & D & D & \checkmark & 34.5 ms \\
+  The best title for this passage \ldots    & B & B & \checkmark & 21.1 ms \\
+  If I am driving at 100 km/hr \ldots       & A & D & $\times$ & 18.2 ms \\
+  How long did Gauguin live \ldots          & C & A & $\times$ & 18.8 ms \\
+  The author thought the Chinese \ldots     & A & B & $\times$ & 19.6 ms \\
+  \midrule
+  \multicolumn{3}{l}{Demo Accuracy} & \multicolumn{2}{r}{2/5 (40\%)} \\
+  \multicolumn{3}{l}{Avg Latency}   & \multicolumn{2}{r}{22.4 ms} \\
+  \bottomrule
+\end{tabular}
+\end{table}
+
+% ============================================================
+\section{Model B: Distractor and Hint Generation}
+% ============================================================
+
+\subsection{Distractor Generation}
+
+\begin{enumerate}
+  \item Extract content-word candidates from the article (excluding stopwords,
+        $\text{len} > 3$).
+  \item Remove candidates that overlap with the correct answer.
+  \item Score each candidate by TF-IDF cosine similarity to the correct answer.
+  \item Select the $k$ candidates whose similarity is closest to 0.25
+        (plausible but wrong).
+\end{enumerate}
+
+\subsection{Hint Generation}
+
+\begin{enumerate}
+  \item Split the article into sentences.
+  \item Rank sentences by TF-IDF cosine similarity to the question.
+  \item Return the top-$k$ sentences in ascending similarity order
+        (general $\to$ specific).
+\end{enumerate}
+
+\subsection{Evaluation}
+
+\begin{table}[H]
+\centering
+\caption{Model B — Distractor Evaluation (50 dev samples, 150 distractors)}
+\begin{tabular}{lr}
+  \toprule
+  \textbf{Metric} & \textbf{Value} \\
+  \midrule
+  Total distractors & 150 \\
+  Valid distractors & 150 \\
+  Accuracy          & 1.0000 \\
+  Precision         & 1.0000 \\
+  Recall            & 1.0000 \\
+  F1 Score          & 1.0000 \\
+  \bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Interpretation:} All generated distractors are surface-valid (differ
+from the correct answer and contain no placeholder text).  Quality as
+perceived by a human reader is harder to quantify without manual annotation.
+
+\subsection{Demo Output}
+
+\begin{figure}[H]
+  \centering
+  \fbox{\includegraphics[width=0.85\textwidth]{screenshots/model_b_demo.png}}
+  \caption{Model B demo: generated distractors and hints for a sample question
+           about the Dahab explosions.}
+  \label{fig:model_b_demo}
+\end{figure}
+
+% ============================================================
+\section{Streamlit UI}
+% ============================================================
+
+\begin{figure}[H]
+  \centering
+  \fbox{\includegraphics[width=0.85\textwidth]{screenshots/ui_tab1.png}}
+  \caption{Tab 1 — Article Input: load a RACE sample or paste a custom article.}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \fbox{\includegraphics[width=0.85\textwidth]{screenshots/ui_tab2.png}}
+  \caption{Tab 2 — Quiz: answer MCQ variants with Model B distractors.}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \fbox{\includegraphics[width=0.85\textwidth]{screenshots/ui_tab3.png}}
+  \caption{Tab 3 — Hints: progressively reveal passage-extracted hints.}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \fbox{\includegraphics[width=0.85\textwidth]{screenshots/ui_tab4.png}}
+  \caption{Tab 4 — Developer Dashboard: Model A/B metrics, latency chart,
+           session history, and CSV export.}
+\end{figure}
+
+% ============================================================
+\section{System Architecture Summary}
+% ============================================================
+
+\begin{table}[H]
+\centering
+\caption{Full Pipeline — Component Summary}
+\begin{tabular}{llp{6.5cm}}
+  \toprule
+  \textbf{Component} & \textbf{Method} & \textbf{Role} \\
+  \midrule
+  Preprocessing     & Binary expansion (4 rows/MCQ)                  & Convert MCQ task to binary classification \\
+  Features          & TF-IDF (15k) + 3 cosine scores                 & Lexical + semantic similarity \\
+  Model A (sup.)    & LR + LinearSVC ensemble (60/40 soft vote)       & Predict correct option \\
+  Model A (semi.)   & Label Propagation (knn, 30\% unlabelled)        & Leverage unlabelled data \\
+  Model A (unsup.)  & KMeans $k=2$, GMM (diag)                        & Cluster options without labels \\
+  NN comparison     & MLP Shallow (256) + MLP Deep (512-256-128)      & Validate classical ML choice \\
+  Model B dist.     & TF-IDF cosine $\approx$ 0.25 target             & Generate plausible wrong options \\
+  Model B hints     & Sentence ranking by cosine to question          & Extractive passage hints \\
+  UI                & Streamlit (4 tabs)                              & Interactive quiz application \\
+  \bottomrule
+\end{tabular}
+\end{table}
+
+% ============================================================
+\section{Conclusion}
+% ============================================================
+
+\begin{itemize}
+  \item TF-IDF cosine similarity to the passage is a statistically significant
+        ($p = 0.015$) and practically useful feature for answer verification.
+  \item \textbf{Linear SVM} (60.4\% accuracy) is the best classical supervised
+        model on this feature space.
+  \item \textbf{MLP neural networks} offer marginal improvement ($+0.8\%$) but
+        add training complexity; for sparse TF-IDF features, linear classifiers
+        are the right choice.
+  \item \textbf{Label Propagation} (77.7\% accuracy) demonstrates strong
+        semi-supervised performance, outperforming both fully supervised and
+        neural network baselines by leveraging unlabelled examples.
+  \item \textbf{Model B} generates 100\% surface-valid distractors and
+        coherent passage-ranked hints, completing the end-to-end MCQ pipeline.
+\end{itemize}
+
+\begin{thebibliography}{9}
+  \bibitem{lai2017race}
+    Guokun Lai et al.
+    \textit{RACE: Large-scale ReAding Comprehension Dataset From Examinations}.
+    EMNLP 2017.
+    \url{https://aclanthology.org/D17-1082/}
+\end{thebibliography}
+
+\end{document}

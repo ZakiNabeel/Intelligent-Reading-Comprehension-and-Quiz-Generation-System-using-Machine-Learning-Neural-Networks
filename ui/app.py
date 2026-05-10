@@ -1,5 +1,6 @@
 import random
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -10,45 +11,65 @@ import streamlit as st
 BASE_DIR = Path(__file__).resolve().parent.parent
 SRC_DIR = BASE_DIR / "src"
 RAW_DIR = BASE_DIR / "data" / "raw"
+MODEL_A_DIR = BASE_DIR / "models" / "model_a" / "traditional"
+MODEL_B_DIR = BASE_DIR / "models" / "model_b" / "traditional"
 
 if str(SRC_DIR) not in sys.path:
     sys.path.append(str(SRC_DIR))
 
-from quiz_pipeline import build_quiz_item
+
+# ── Pre-flight: check that all required .pkl files exist before importing ──────
+_REQUIRED_MODELS = [
+    MODEL_A_DIR / "logistic_regression.pkl",
+    MODEL_A_DIR / "linear_svm.pkl",
+    MODEL_A_DIR / "tfidf_vectorizer.pkl",
+    MODEL_B_DIR / "model_b_vectorizer.pkl",
+]
+
+_missing_models = [str(p) for p in _REQUIRED_MODELS if not p.exists()]
+
+
+def _import_quiz_pipeline():
+    """Import quiz_pipeline only after confirming model files exist."""
+    try:
+        from quiz_pipeline import build_quiz_item
+        return build_quiz_item
+    except Exception as exc:
+        return exc
 
 
 st.set_page_config(
     page_title="AI Reading Comprehension Quiz System",
-    page_icon="📚",
+    page_icon="\U0001f4da",
     layout="wide",
 )
 
 
-@st.cache_data
-def load_dataset(split="dev"):
+# ── Dataset loader — cached so the CSV is only read once per session ──────────
+@st.cache_data(show_spinner="Loading dataset…")
+def load_dataset(split: str = "dev") -> pd.DataFrame:
     file_path = RAW_DIR / f"{split}.csv"
     if not file_path.exists():
-        raise FileNotFoundError(f"Dataset file not found: {file_path}")
+        raise FileNotFoundError(
+            f"Dataset file not found: {file_path}\n\n"
+            "Run the data download step first (see README — Step 0b)."
+        )
     return pd.read_csv(file_path)
 
 
-def get_random_sample(df):
+def get_random_sample(df: pd.DataFrame):
     return df.iloc[random.randint(0, len(df) - 1)]
 
 
-def get_sample_by_index(df, index):
+def get_sample_by_index(df: pd.DataFrame, index: int):
     return df.iloc[index]
 
 
-def build_options(row):
-    return {
-        "A": row["A"],
-        "B": row["B"],
-        "C": row["C"],
-        "D": row["D"],
-    }
+def build_options(row) -> dict:
+    return {"A": row["A"], "B": row["B"], "C": row["C"], "D": row["D"]}
 
 
+# ── Session state initialisation ───────────────────────────────────────────────
 def initialise_state():
     defaults = {
         "quiz_item": None,
@@ -60,8 +81,8 @@ def initialise_state():
         "logged_attempt_keys": [],
         "use_generated_distractors": True,
         "mcq_count": 3,
+        "inference_latencies": [],
     }
-
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
@@ -74,21 +95,23 @@ def reset_quiz_state():
     st.session_state.logged_attempt_keys = []
 
 
-def normalise_distractors(distractors, correct_answer, fallback_options, needed=3):
+# ── Distractor normalisation ───────────────────────────────────────────────────
+def normalise_distractors(
+    distractors: list, correct_answer: str, fallback_options: dict, needed: int = 3
+) -> list:
+    """Return exactly `needed` distractor strings, falling back to original options."""
     correct_clean = str(correct_answer).strip().lower()
     fallback_values = [
-        str(option).strip()
-        for option in fallback_options.values()
-        if str(option).strip().lower() != correct_clean
+        str(v).strip()
+        for v in fallback_options.values()
+        if str(v).strip().lower() != correct_clean
     ]
 
-    cleaned = []
-    seen = {correct_clean}
-
+    cleaned, seen = [], {correct_clean}
     for item in distractors:
         text = str(item).strip()
         key = text.lower()
-        if not text or key in seen or "no suitable" in key:
+        if not text or key in seen or "no suitable" in key or "unavailable" in key:
             continue
         cleaned.append(text)
         seen.add(key)
@@ -104,14 +127,14 @@ def normalise_distractors(distractors, correct_answer, fallback_options, needed=
             break
 
     while len(cleaned) < needed:
-        cleaned.append("Distractor unavailable")
+        cleaned.append("(distractor unavailable)")
 
     return cleaned[:needed]
 
 
-def build_display_options(quiz_item, use_generated_distractors=True):
+# ── Option set builders ────────────────────────────────────────────────────────
+def build_display_options(quiz_item: dict, use_generated_distractors: bool = True):
     correct_answer = str(quiz_item["correct_answer"]).strip()
-
     if use_generated_distractors:
         distractors = normalise_distractors(
             quiz_item.get("generated_distractors", []),
@@ -128,15 +151,16 @@ def build_display_options(quiz_item, use_generated_distractors=True):
     labels = ["A", "B", "C", "D"]
     display_options = dict(zip(labels, option_texts))
     correct_label = next(
-        (label for label, text in display_options.items()
-         if str(text).strip().lower() == correct_answer.lower()),
+        (lbl for lbl, txt in display_options.items()
+         if str(txt).strip().lower() == correct_answer.lower()),
         labels[0],
     )
-
     return display_options, correct_label, source
 
 
-def build_mcq_variants(quiz_item, use_generated_distractors=True, variant_count=3):
+def build_mcq_variants(
+    quiz_item: dict, use_generated_distractors: bool = True, variant_count: int = 3
+) -> list:
     correct_answer = str(quiz_item["correct_answer"]).strip()
     labels = ["A", "B", "C", "D"]
     variants = []
@@ -151,16 +175,16 @@ def build_mcq_variants(quiz_item, use_generated_distractors=True, variant_count=
         option_source = "Model B generated distractors"
     else:
         pool = [
-            str(option).strip()
-            for option in quiz_item["original_options"].values()
-            if str(option).strip().lower() != correct_answer.lower()
+            str(v).strip()
+            for v in quiz_item["original_options"].values()
+            if str(v).strip().lower() != correct_answer.lower()
         ]
         option_source = "Original RACE options"
 
     for idx in range(variant_count):
         if use_generated_distractors:
             start = idx * 3
-            distractors = pool[start:start + 3]
+            distractors = pool[start : start + 3]
             if len(distractors) < 3:
                 distractors = (distractors + pool)[:3]
         else:
@@ -170,88 +194,103 @@ def build_mcq_variants(quiz_item, use_generated_distractors=True, variant_count=
         random.shuffle(option_texts)
         display_options = dict(zip(labels, option_texts))
         correct_label = next(
-            (label for label, text in display_options.items()
-             if str(text).strip().lower() == correct_answer.lower()),
+            (lbl for lbl, txt in display_options.items()
+             if str(txt).strip().lower() == correct_answer.lower()),
             labels[0],
         )
-        variants.append({
-            "variant_index": idx,
-            "display_options": display_options,
-            "display_correct_label": correct_label,
-            "option_source": option_source,
-        })
+        variants.append(
+            {
+                "variant_index": idx,
+                "display_options": display_options,
+                "display_correct_label": correct_label,
+                "option_source": option_source,
+            }
+        )
 
     return variants
 
 
-def prepare_quiz_item(article, question, options, correct_label):
-    quiz_item = build_quiz_item(article, question, options, correct_label)
+# ── Quiz item construction ─────────────────────────────────────────────────────
+def prepare_quiz_item(
+    article: str, question: str, options: dict, correct_label: str
+) -> dict:
+    t0 = time.time()
+    quiz_item = _build_quiz_item(article, question, options, correct_label)
+    latency = time.time() - t0
+    st.session_state.inference_latencies.append(latency)
     quiz_item["mcq_variants"] = build_mcq_variants(
         quiz_item,
         st.session_state.use_generated_distractors,
         st.session_state.mcq_count,
     )
-    first_variant = quiz_item["mcq_variants"][0]
-    quiz_item["display_options"] = first_variant["display_options"]
-    quiz_item["display_correct_label"] = first_variant["display_correct_label"]
-    quiz_item["option_source"] = first_variant["option_source"]
+    first = quiz_item["mcq_variants"][0]
+    quiz_item["display_options"] = first["display_options"]
+    quiz_item["display_correct_label"] = first["display_correct_label"]
+    quiz_item["option_source"] = first["option_source"]
     return quiz_item
 
 
-def set_quiz_item(quiz_item):
+def set_quiz_item(quiz_item: dict):
     st.session_state.quiz_item = quiz_item
     st.session_state.quiz_id += 1
     reset_quiz_state()
 
 
 def create_quiz_from_row(row):
-    article = row["article"]
-    question = row["question"]
-    options = build_options(row)
-    correct_label = row["answer"]
+    quiz_item = prepare_quiz_item(
+        row["article"], row["question"], build_options(row), row["answer"]
+    )
+    set_quiz_item(quiz_item)
+
+
+def create_custom_quiz(
+    article: str, question: str, options: dict, correct_label: str
+):
     quiz_item = prepare_quiz_item(article, question, options, correct_label)
     set_quiz_item(quiz_item)
 
 
-def create_custom_quiz(article, question, options, correct_label):
-    quiz_item = prepare_quiz_item(article, question, options, correct_label)
-    set_quiz_item(quiz_item)
-
-
-def append_attempt_once(variant, selected_label, is_correct):
+# ── History helper ─────────────────────────────────────────────────────────────
+def append_attempt_once(variant: dict, selected_label: str, is_correct: bool):
     attempt_key = f"{st.session_state.quiz_id}:{variant['variant_index']}"
     if attempt_key in st.session_state.logged_attempt_keys:
         return
-
-    quiz_item = st.session_state.quiz_item
-    selected_text = variant["display_options"][selected_label]
-
-    st.session_state.history.append({
-        "question": quiz_item["question"],
-        "mcq_number": variant["variant_index"] + 1,
-        "option_source": variant["option_source"],
-        "selected_label": selected_label,
-        "selected_answer": selected_text,
-        "correct_label": variant["display_correct_label"],
-        "correct_answer": quiz_item["correct_answer"],
-        "is_correct": is_correct,
-        "model_a_prediction": quiz_item["model_a_prediction"],
-        "model_a_confidence": quiz_item["model_a_confidence"],
-    })
+    qi = st.session_state.quiz_item
+    st.session_state.history.append(
+        {
+            "question": qi["question"],
+            "mcq_number": variant["variant_index"] + 1,
+            "option_source": variant["option_source"],
+            "selected_label": selected_label,
+            "selected_answer": variant["display_options"][selected_label],
+            "correct_label": variant["display_correct_label"],
+            "correct_answer": qi["correct_answer"],
+            "is_correct": is_correct,
+            "model_a_prediction": qi["model_a_prediction"],
+            "model_a_confidence": qi["model_a_confidence"],
+        }
+    )
     st.session_state.logged_attempt_keys.append(attempt_key)
 
 
-def render_model_a_scores(quiz_item):
-    score_df = pd.DataFrame({
-        "Option": list(quiz_item["model_a_scores"].keys()),
-        "Original option text": [
-            quiz_item["original_options"].get(label, "")
-            for label in quiz_item["model_a_scores"].keys()
-        ],
-        "Score": list(quiz_item["model_a_scores"].values()),
-    })
+# ── Shared widget ──────────────────────────────────────────────────────────────
+def render_model_a_scores(quiz_item: dict):
+    score_df = pd.DataFrame(
+        {
+            "Option": list(quiz_item["model_a_scores"].keys()),
+            "Original option text": [
+                quiz_item["original_options"].get(lbl, "")
+                for lbl in quiz_item["model_a_scores"].keys()
+            ],
+            "Score": list(quiz_item["model_a_scores"].values()),
+        }
+    )
     st.dataframe(score_df, use_container_width=True)
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# APP ENTRY POINT
+# ══════════════════════════════════════════════════════════════════════════════
 
 initialise_state()
 
@@ -261,39 +300,85 @@ st.markdown(
     "Logistic Regression, SVM, cosine similarity, distractors, and hints."
 )
 
-try:
-    df = load_dataset("dev")
-except Exception as exc:
-    st.error(f"Could not load the RACE dev dataset: {exc}")
+# ── Guard: missing model files ─────────────────────────────────────────────────
+if _missing_models:
+    st.error(
+        "**Required model files are missing.** "
+        "Train the models first by running the pipeline in order:\n\n"
+        "```\n"
+        "cd src\n"
+        "python preprocessing.py\n"
+        "python model_a_train.py\n"
+        "python model_b_train.py\n"
+        "```\n\n"
+        "**Missing files:**\n"
+        + "\n".join(f"- `{p}`" for p in _missing_models)
+    )
     st.stop()
 
-tab1, tab2, tab3, tab4 = st.tabs([
-    "1. Article Input",
-    "2. Quiz",
-    "3. Hints",
-    "4. Developer Dashboard",
-])
+# ── Import quiz pipeline after model check ─────────────────────────────────────
+_build_quiz_item = _import_quiz_pipeline()
+if isinstance(_build_quiz_item, Exception):
+    st.error(
+        f"**Failed to load quiz pipeline:** {_build_quiz_item}\n\n"
+        "Make sure all model files are present and dependencies are installed."
+    )
+    st.stop()
+
+# ── Load dataset with a clear error if missing ────────────────────────────────
+try:
+    df = load_dataset("dev")
+except FileNotFoundError as exc:
+    st.error(
+        f"**Dataset not found.**\n\n{exc}\n\n"
+        "Download the RACE dataset and place `dev.csv` in `data/raw/`."
+    )
+    st.stop()
+except Exception as exc:
+    st.error(f"**Unexpected error loading dataset:** {exc}")
+    st.stop()
+
+tab1, tab2, tab3, tab4 = st.tabs(
+    ["1. Article Input", "2. Quiz", "3. Hints", "4. Developer Dashboard"]
+)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 1 — ARTICLE INPUT
+# ══════════════════════════════════════════════════════════════════════════════
 with tab1:
     st.header("Article Input")
+    st.markdown(
+        "Choose how to load an article, then head to the **Quiz** tab to answer."
+    )
 
-    st.session_state.use_generated_distractors = st.checkbox(
-        "Use Model B generated distractors in the quiz",
-        value=st.session_state.use_generated_distractors,
-        help="When disabled, the quiz uses the original RACE answer options.",
-    )
-    st.session_state.mcq_count = st.number_input(
-        "Number of MCQ variants to generate for this question",
-        min_value=1,
-        max_value=5,
-        value=int(st.session_state.mcq_count),
-        step=1,
-        help="Each MCQ uses the same question and correct answer, but a separate shuffled option set.",
-    )
+    col_settings_a, col_settings_b = st.columns(2)
+    with col_settings_a:
+        st.session_state.use_generated_distractors = st.checkbox(
+            "Use Model B generated distractors",
+            value=st.session_state.use_generated_distractors,
+            help=(
+                "When enabled, wrong answer options are generated by Model B from the article text. "
+                "When disabled, the original RACE answer options are used."
+            ),
+        )
+    with col_settings_b:
+        st.session_state.mcq_count = st.number_input(
+            "MCQ variants per question",
+            min_value=1,
+            max_value=5,
+            value=int(st.session_state.mcq_count),
+            step=1,
+            help=(
+                "Each variant uses the same question and correct answer, "
+                "but a different shuffled set of distractors."
+            ),
+        )
+
+    st.divider()
 
     input_mode = st.radio(
-        "Choose input mode:",
+        "Input mode:",
         ["Load RACE Sample", "Paste Custom Article"],
         horizontal=True,
         key="input_mode",
@@ -301,7 +386,7 @@ with tab1:
 
     if input_mode == "Load RACE Sample":
         sample_index = st.number_input(
-            "Sample index",
+            f"Sample index (0 – {len(df) - 1})",
             min_value=0,
             max_value=len(df) - 1,
             value=0,
@@ -316,57 +401,61 @@ with tab1:
         )
 
         if load_selected_btn:
-            with st.spinner("Generating quiz from selected sample..."):
+            with st.spinner("Running Model A + B inference…"):
                 try:
                     create_quiz_from_row(get_sample_by_index(df, sample_index))
-                    st.success(f"Sample {sample_index} loaded. Head to the **Quiz** tab to answer.")
+                    st.success(
+                        f"Sample {sample_index} loaded. "
+                        "Head to the **Quiz** tab to answer."
+                    )
                 except Exception as exc:
                     st.error(f"Could not generate quiz: {exc}")
+                    st.exception(exc)
 
         if random_btn:
-            with st.spinner("Generating quiz from random sample..."):
+            with st.spinner("Running Model A + B inference…"):
                 try:
                     create_quiz_from_row(get_random_sample(df))
                     st.success("Random sample loaded. Head to the **Quiz** tab to answer.")
                 except Exception as exc:
                     st.error(f"Could not generate quiz: {exc}")
+                    st.exception(exc)
 
     else:
-        st.warning(
-            "Custom article mode requires a question and four answer options. "
-            "Automatic question generation can be connected later."
+        st.info(
+            "Paste any article and provide a question with four answer options. "
+            "Model A will predict the correct answer and Model B will generate hints."
         )
-
-        article = st.text_area("Paste your article here:", height=250)
-        question = st.text_input("Enter question:")
+        article = st.text_area("Article:", height=250, placeholder="Paste your reading passage here…")
+        question = st.text_input("Question:", placeholder="Enter the comprehension question…")
 
         col1, col2 = st.columns(2)
         with col1:
-            option_a = st.text_input("Option A")
-            option_b = st.text_input("Option B")
+            option_a = st.text_input("Option A", key="opt_a")
+            option_b = st.text_input("Option B", key="opt_b")
         with col2:
-            option_c = st.text_input("Option C")
-            option_d = st.text_input("Option D")
+            option_c = st.text_input("Option C", key="opt_c")
+            option_d = st.text_input("Option D", key="opt_d")
 
-        correct_label = st.selectbox("Correct answer label", ["A", "B", "C", "D"])
+        correct_label = st.selectbox(
+            "Correct answer label",
+            ["A", "B", "C", "D"],
+            help="Which option above is the ground-truth answer?",
+        )
 
-        if st.button("Create Custom Quiz", key="create_custom"):
+        if st.button("Create Custom Quiz", key="create_custom", type="primary"):
             required_values = [article, question, option_a, option_b, option_c, option_d]
-            if not all(str(value).strip() for value in required_values):
-                st.error("Please fill all fields before creating the quiz.")
+            if not all(str(v).strip() for v in required_values):
+                st.error("Please fill in all fields (article, question, and all four options).")
             else:
-                options = {
-                    "A": option_a,
-                    "B": option_b,
-                    "C": option_c,
-                    "D": option_d,
-                }
-                with st.spinner("Generating custom quiz..."):
+                options = {"A": option_a, "B": option_b, "C": option_c, "D": option_d}
+                with st.spinner("Running Model A + B inference…"):
                     try:
                         create_custom_quiz(article, question, options, correct_label)
                         st.success("Custom quiz created. Head to the **Quiz** tab to answer.")
                     except Exception as exc:
                         st.error(f"Could not generate custom quiz: {exc}")
+                        st.exception(exc)
 
     if st.session_state.quiz_item is not None:
         qi = st.session_state.quiz_item
@@ -376,6 +465,9 @@ with tab1:
             st.caption(article_preview + ("…" if len(qi["article"]) > 400 else ""))
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 2 — QUIZ
+# ══════════════════════════════════════════════════════════════════════════════
 with tab2:
     st.header("Question and Answer Quiz")
 
@@ -385,7 +477,7 @@ with tab2:
     _c1, _c2, _c3 = st.columns(3)
     _c1.metric("Questions Answered", _total)
     _c2.metric("Correct", _correct)
-    _c3.metric("Accuracy", _acc)
+    _c3.metric("Session Accuracy", _acc)
 
     quiz_item = st.session_state.quiz_item
 
@@ -394,20 +486,20 @@ with tab2:
     else:
         q_num = st.session_state.quiz_id
         variants = quiz_item.get("mcq_variants", [])
-        st.caption(f"Question #{q_num} - {len(variants)} MCQ variant(s) generated")
+        st.caption(f"Question #{q_num}  ·  {len(variants)} MCQ variant(s)")
 
         word_count = len(quiz_item["article"].split())
         with st.expander(f"Show Article ({word_count} words)", expanded=False):
             st.write(quiz_item["article"])
 
         st.markdown(
-            f"<div style='background:#1e2a3a;border-left:4px solid #4a9eff;"
-            f"padding:12px 16px;border-radius:4px;margin:12px 0'>"
+            "<div style='background:#1e2a3a;border-left:4px solid #4a9eff;"
+            "padding:12px 16px;border-radius:4px;margin:12px 0'>"
             f"<strong>{quiz_item['question']}</strong></div>",
             unsafe_allow_html=True,
         )
 
-        st.markdown("**Choose your answers:**")
+        st.markdown("**Choose your answer for each variant:**")
         for variant in variants:
             variant_index = variant["variant_index"]
             selected_key = str(variant_index)
@@ -415,32 +507,31 @@ with tab2:
             labels = list(display_options.keys())
             selected_answer = st.session_state.selected_answers.get(selected_key)
             default_index = (
-                labels.index(selected_answer)
-                if selected_answer in labels
-                else None
+                labels.index(selected_answer) if selected_answer in labels else None
             )
 
             with st.container(border=True):
                 st.markdown(
-                    f"**MCQ {variant_index + 1}**  \n"
-                    f"Options source: {variant['option_source']}"
+                    f"**Variant {variant_index + 1}**  "
+                    f"<span style='color:#888;font-size:0.85em'>"
+                    f"({variant['option_source']})</span>",
+                    unsafe_allow_html=True,
                 )
                 selected = st.radio(
-                    f"Options for MCQ {variant_index + 1}",
+                    f"Options for Variant {variant_index + 1}",
                     labels,
                     index=default_index,
-                    format_func=lambda label: f"{label}. {display_options[label]}",
+                    format_func=lambda lbl: f"{lbl}. {display_options[lbl]}",
                     key=f"answer_radio_{st.session_state.quiz_id}_{variant_index}",
                     label_visibility="collapsed",
                 )
                 st.session_state.selected_answers[selected_key] = selected
 
                 already_checked = st.session_state.checked_variants.get(selected_key, False)
-                check_disabled = already_checked or selected is None
                 if st.button(
-                    f"Check MCQ {variant_index + 1}",
+                    f"Check Answer",
                     key=f"check_answer_{st.session_state.quiz_id}_{variant_index}",
-                    disabled=check_disabled,
+                    disabled=already_checked or selected is None,
                     type="primary",
                 ):
                     is_correct = selected == variant["display_correct_label"]
@@ -449,32 +540,35 @@ with tab2:
                     st.rerun()
 
                 if st.session_state.checked_variants.get(selected_key, False):
-                    selected = st.session_state.selected_answers.get(selected_key)
-                    is_correct = selected == variant["display_correct_label"]
-
+                    sel = st.session_state.selected_answers.get(selected_key)
+                    is_correct = sel == variant["display_correct_label"]
                     if is_correct:
-                        st.success("Correct answer!")
+                        st.success("Correct!")
                     else:
                         st.error(
-                            f"Incorrect. Correct answer is "
-                            f"{variant['display_correct_label']}. {quiz_item['correct_answer']}"
+                            f"Incorrect. The correct answer is "
+                            f"**{variant['display_correct_label']}**: "
+                            f"{quiz_item['correct_answer']}"
                         )
 
         if any(st.session_state.checked_variants.values()):
-            model_agrees = quiz_item["model_a_prediction"] == quiz_item["correct_label"]
+            model_agrees = (
+                quiz_item["model_a_prediction"] == quiz_item["correct_label"]
+            )
+            agree_icon = "✓" if model_agrees else "✗"
             st.info(
-                f"Model A predicted original RACE option **{quiz_item['model_a_prediction']}** "
-                f"(confidence {quiz_item['model_a_confidence']:.4f}). "
-                f"{'Matches' if model_agrees else 'Does not match'} "
+                f"**Model A** predicted original RACE option "
+                f"**{quiz_item['model_a_prediction']}** "
+                f"(confidence {quiz_item['model_a_confidence']:.3f}).  "
+                f"{agree_icon} {'Matches' if model_agrees else 'Does not match'} "
                 f"the dataset gold label ({quiz_item['correct_label']})."
             )
-
             with st.expander("Model A Scores on Original RACE Options"):
                 render_model_a_scores(quiz_item)
 
             st.divider()
-            if st.button("Next Random Question ->", key="next_question_btn", type="primary"):
-                with st.spinner("Generating next quiz..."):
+            if st.button("Next Random Question →", key="next_question_btn", type="primary"):
+                with st.spinner("Running Model A + B inference…"):
                     try:
                         create_quiz_from_row(get_random_sample(df))
                         st.rerun()
@@ -482,29 +576,35 @@ with tab2:
                         st.error(f"Could not generate quiz: {exc}")
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 3 — HINTS
+# ══════════════════════════════════════════════════════════════════════════════
 with tab3:
     st.header("Hint Panel")
+    st.markdown(
+        "Reveal hints one at a time to guide you to the answer. "
+        "Hints are ranked from most general to most specific."
+    )
 
     quiz_item = st.session_state.quiz_item
 
     if quiz_item is None:
-        st.info("Load or create a quiz first.")
+        st.info("Load or create a quiz from the **Article Input** tab first.")
     else:
+        st.markdown(f"**Question:** {quiz_item['question']}")
         hints = quiz_item.get("generated_hints", [])
-        st.write("Reveal hints gradually before revealing the answer.")
 
         if not hints:
-            st.warning("No hints were generated for this quiz.")
+            st.warning("No hints were generated for this question.")
         else:
             revealed = st.session_state.hint_count
             total_hints = len(hints)
-            next_hint_disabled = revealed >= total_hints
 
             hint_col, prog_col = st.columns([2, 1])
             if hint_col.button(
                 "Show Next Hint",
                 key=f"show_hint_{st.session_state.quiz_id}",
-                disabled=next_hint_disabled,
+                disabled=revealed >= total_hints,
             ):
                 st.session_state.hint_count += 1
                 revealed = st.session_state.hint_count
@@ -516,79 +616,139 @@ with tab3:
             )
 
             for i in range(st.session_state.hint_count):
-                st.info(f"Hint {i + 1}: {hints[i]}")
+                st.info(f"**Hint {i + 1}:** {hints[i]}")
 
-            if st.session_state.hint_count >= len(hints):
+            if st.session_state.hint_count >= total_hints:
                 st.caption("All hints revealed.")
                 if st.button(
                     "Reveal Answer",
                     key=f"reveal_answer_{st.session_state.quiz_id}",
                 ):
                     st.success(
-                        f"Answer: {quiz_item['display_correct_label']}. "
+                        f"**Answer: {quiz_item['display_correct_label']}.**  "
                         f"{quiz_item['correct_answer']}"
                     )
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 4 — DEVELOPER DASHBOARD
+# ══════════════════════════════════════════════════════════════════════════════
 with tab4:
     st.header("Developer / Analytics Dashboard")
 
     quiz_item = st.session_state.quiz_item
 
-    col1, col2, col3 = st.columns(3)
-
+    # Top-level session metrics
     total_attempts = len(st.session_state.history)
-    correct_attempts = sum(1 for item in st.session_state.history if item["is_correct"])
-    accuracy = correct_attempts / total_attempts if total_attempts else 0
+    correct_attempts = sum(1 for h in st.session_state.history if h["is_correct"])
+    user_acc = correct_attempts / total_attempts if total_attempts else 0
+    latencies = st.session_state.inference_latencies
+    avg_latency = sum(latencies) / len(latencies) if latencies else 0.0
 
-    col1.metric("Total Attempts", total_attempts)
-    col2.metric("User Accuracy", f"{accuracy * 100:.1f}%")
-    col3.metric("Dataset Samples", len(df))
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total Attempts", total_attempts)
+    c2.metric("User Accuracy", f"{user_acc * 100:.1f}%")
+    c3.metric("Dataset Samples", len(df))
+    c4.metric("Avg Inference (s)", f"{avg_latency:.2f}s")
 
+    if latencies:
+        with st.expander("Inference Latency per Request", expanded=False):
+            lat_df = pd.DataFrame(
+                {"Request #": list(range(1, len(latencies) + 1)), "Latency (s)": latencies}
+            )
+            st.line_chart(lat_df.set_index("Request #"))
+            st.caption(
+                f"Min: {min(latencies):.2f}s  |  Max: {max(latencies):.2f}s  |  Avg: {avg_latency:.2f}s"
+            )
+
+    # Model A — current inference
     if quiz_item is not None:
-        st.subheader("Current Model A Output")
-        ma_c1, ma_c2 = st.columns(2)
+        st.subheader("Model A — Current Inference")
+        ma_c1, ma_c2, ma_c3 = st.columns(3)
         ma_c1.metric("Predicted Option", quiz_item["model_a_prediction"])
         ma_c2.metric("Confidence", f"{quiz_item['model_a_confidence']:.4f}")
-
+        ma_c3.metric(
+            "Correct?",
+            "Yes" if quiz_item["model_a_prediction"] == quiz_item["correct_label"] else "No",
+        )
         render_model_a_scores(quiz_item)
-
-        score_chart_df = pd.DataFrame({
-            "Option": list(quiz_item["model_a_scores"].keys()),
-            "Score": list(quiz_item["model_a_scores"].values()),
-        })
+        score_chart_df = pd.DataFrame(
+            {
+                "Option": list(quiz_item["model_a_scores"].keys()),
+                "Score": list(quiz_item["model_a_scores"].values()),
+            }
+        )
         st.bar_chart(score_chart_df.set_index("Option"))
 
-        st.subheader("Model B Output")
+    # Model A — session accuracy
+    if total_attempts:
+        st.subheader("Model A — Session Accuracy")
+        model_a_correct = sum(
+            1 for h in st.session_state.history
+            if h.get("model_a_prediction") == h.get("correct_label")
+        )
+        model_a_acc = model_a_correct / total_attempts
+        ma_s1, ma_s2, ma_s3 = st.columns(3)
+        ma_s1.metric("Model A Accuracy", f"{model_a_acc * 100:.1f}%")
+        ma_s2.metric("Model A Correct", model_a_correct)
+        ma_s3.metric("Total Evaluated", total_attempts)
+
+    # Model B — distractor & hint quality
+    if quiz_item is not None:
+        st.subheader("Model B — Distractor & Hint Quality")
         distractors = quiz_item.get("generated_distractors", [])
         hints = quiz_item.get("generated_hints", [])
+        correct_answer = str(quiz_item.get("correct_answer", "")).strip().lower()
+
+        valid_dist = sum(
+            1 for d in distractors
+            if str(d).strip().lower() != correct_answer
+            and "no suitable" not in str(d).lower()
+            and "unavailable" not in str(d).lower()
+        )
+        total_dist = max(len(distractors), 1)
+        dist_acc = valid_dist / total_dist
+        dist_recall = min(valid_dist / 3, 1.0)
+
+        mb_m1, mb_m2, mb_m3, mb_m4 = st.columns(4)
+        mb_m1.metric("Distractor Accuracy", f"{dist_acc * 100:.1f}%")
+        mb_m2.metric("Distractor Precision", f"{dist_acc * 100:.1f}%")
+        mb_m3.metric("Distractor Recall", f"{dist_recall * 100:.1f}%")
+        mb_m4.metric("Hints Generated", len(hints))
 
         mb_c1, mb_c2 = st.columns(2)
         with mb_c1:
             st.markdown("**Generated Distractors**")
             for d in distractors:
-                st.write(f"- {d}")
+                is_valid = (
+                    str(d).strip().lower() != correct_answer
+                    and "no suitable" not in str(d).lower()
+                )
+                icon = "✅" if is_valid else "⚠️"
+                st.write(f"{icon} {d}")
         with mb_c2:
             st.markdown("**Generated Hints**")
-            for h in hints:
-                st.write(f"- {h}")
+            for i, h in enumerate(hints, 1):
+                st.write(f"**{i}.** {h}")
 
+    # Session history & CSV export
     if st.session_state.history:
         st.subheader("Session History")
-        history_df = pd.DataFrame(st.session_state.history).rename(columns={
-            "question": "Question",
-            "mcq_number": "MCQ #",
-            "option_source": "Option Source",
-            "selected_label": "Your Label",
-            "selected_answer": "Your Answer",
-            "correct_label": "Correct Label",
-            "correct_answer": "Correct Answer",
-            "is_correct": "Correct?",
-            "model_a_prediction": "Model A Prediction",
-            "model_a_confidence": "Model A Confidence",
-        })
+        history_df = pd.DataFrame(st.session_state.history).rename(
+            columns={
+                "question": "Question",
+                "mcq_number": "MCQ #",
+                "option_source": "Option Source",
+                "selected_label": "Your Label",
+                "selected_answer": "Your Answer",
+                "correct_label": "Correct Label",
+                "correct_answer": "Correct Answer",
+                "is_correct": "Correct?",
+                "model_a_prediction": "Model A Prediction",
+                "model_a_confidence": "Model A Confidence",
+            }
+        )
         st.dataframe(history_df, use_container_width=True)
-
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         csv = history_df.to_csv(index=False).encode("utf-8")
         st.download_button(
