@@ -643,16 +643,34 @@ with tab2:
                         )
 
         if any(st.session_state.checked_variants.values()):
-            model_agrees = (
-                quiz_item["model_a_prediction"] == quiz_item["correct_label"]
+            first_variant = variants[0] if variants else {}
+            predicted_orig = quiz_item["model_a_prediction"]
+            gold_orig = quiz_item["correct_label"]
+            display_correct = first_variant.get("display_correct_label", gold_orig)
+
+            # Find which shuffled display label holds Model A's predicted option text
+            predicted_text = quiz_item["original_options"].get(predicted_orig, "")
+            predicted_display = next(
+                (lbl for lbl, txt in first_variant.get("display_options", {}).items()
+                 if str(txt).strip().lower() == str(predicted_text).strip().lower()),
+                None,
             )
+
+            model_agrees = (predicted_orig == gold_orig)
             agree_icon = "✓" if model_agrees else "✗"
+
+            if predicted_display:
+                pred_note = f"**{predicted_orig}** (shown as **{predicted_display}** in the shuffled quiz)"
+            else:
+                pred_note = f"**{predicted_orig}** (replaced by a generated distractor in this quiz)"
+
             st.info(
-                f"**Model A** predicted original RACE option "
-                f"**{quiz_item['model_a_prediction']}** "
+                f"**Model A** scored the original RACE options and predicted "
+                f"{pred_note} "
                 f"(confidence {quiz_item['model_a_confidence']:.3f}).  "
                 f"{agree_icon} {'Matches' if model_agrees else 'Does not match'} "
-                f"the dataset gold label ({quiz_item['correct_label']})."
+                f"the dataset gold label (RACE **{gold_orig}**, "
+                f"displayed as **{display_correct}** in this quiz)."
             )
             with st.expander("Model A Scores on Original RACE Options"):
                 render_model_a_scores(quiz_item)

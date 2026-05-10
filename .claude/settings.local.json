@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -c \"import pandas as pd; df = pd.read_csv\\(r'c:\\\\Users\\\\Shehryar Faisal\\\\Desktop\\\\AI_Proj\\\\Intelligent-Reading-Comprehension-and-Quiz-Generation-System-using-Machine-Learning-Neural-Networks\\\\data\\\\raw\\\\dev.csv'\\); print\\('dev.csv rows:', len\\(df\\)\\)\")"
+      "Bash(python -c \"import pandas as pd; df = pd.read_csv\\(r'c:\\\\Users\\\\Shehryar Faisal\\\\Desktop\\\\AI_Proj\\\\Intelligent-Reading-Comprehension-and-Quiz-Generation-System-using-Machine-Learning-Neural-Networks\\\\data\\\\raw\\\\dev.csv'\\); print\\('dev.csv rows:', len\\(df\\)\\)\")",
+      "PowerShell(Move-Item -Path \"c:\\\\Users\\\\Shehryar Faisal\\\\Desktop\\\\AI_Proj\\\\Intelligent-Reading-Comprehension-and-Quiz-Generation-System-using-Machine-Learning-Neural-Networks\\\\model_b_ranker.joblib\" -Destination \"c:\\\\Users\\\\Shehryar Faisal\\\\Desktop\\\\AI_Proj\\\\Intelligent-Reading-Comprehension-and-Quiz-Generation-System-using-Machine-Learning-Neural-Networks\\\\models\\\\model_b\\\\traditional\\\\model_b_ranker.joblib\")",
+      "PowerShell(Move-Item -Path \"c:\\\\Users\\\\Shehryar Faisal\\\\Desktop\\\\AI_Proj\\\\Intelligent-Reading-Comprehension-and-Quiz-Generation-System-using-Machine-Learning-Neural-Networks\\\\model_b_tfidf.joblib\" -Destination \"c:\\\\Users\\\\Shehryar Faisal\\\\Desktop\\\\AI_Proj\\\\Intelligent-Reading-Comprehension-and-Quiz-Generation-System-using-Machine-Learning-Neural-Networks\\\\models\\\\model_b\\\\traditional\\\\model_b_tfidf.joblib\")"
     ]
   }
 }

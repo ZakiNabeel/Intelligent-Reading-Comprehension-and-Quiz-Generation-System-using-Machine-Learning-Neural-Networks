@@ -16,6 +16,7 @@ AI Project/
 │   ├── model_a/traditional/   ← saved .pkl files for Model A
 │   └── model_b/traditional/   ← saved .pkl files for Model B
 ├── src/
+│   ├── split_dataset.py       ← Step 0: split Kaggle CSV into train/dev/test (80/10/10)
 │   ├── preprocessing.py       ← Step 1: preprocess RACE data
 │   ├── model_a_train.py       ← Step 2: train Model A (LR, SVM, KMeans, LP, GMM)
 │   ├── model_b_train.py       ← Step 3: train Model B TF-IDF vectorizer
@@ -47,27 +48,35 @@ pip install -r requirements.txt
 
 ### 2. Get the RACE dataset
 
-Download from Kaggle: https://www.kaggle.com/datasets/ankitdhiman7/race-dataset
+Download the single CSV from Kaggle: https://www.kaggle.com/datasets/ankitdhiman7/race-dataset
 
-Place the three files inside `data/raw/`:
-```
-data/raw/train.csv
-data/raw/dev.csv
-data/raw/test.csv
+Place the downloaded file inside `data/raw/` (e.g. `data/raw/race.csv`).
+
+### Step 0 — Split the dataset (80/10/10)
+
+Run the split script to produce the three split files required by the rest of the pipeline:
+
+```bash
+cd src
+python split_dataset.py
 ```
 
-> If Kaggle only gives one file, split it yourself 80/10/10:
-> ```python
-> import pandas as pd
-> from sklearn.model_selection import train_test_split
->
-> df = pd.read_csv("data/raw/race.csv")
-> train, temp = train_test_split(df, test_size=0.2, random_state=42)
-> dev, test   = train_test_split(temp, test_size=0.5, random_state=42)
-> train.to_csv("data/raw/train.csv", index=False)
-> dev.to_csv("data/raw/dev.csv",   index=False)
-> test.to_csv("data/raw/test.csv",  index=False)
-> ```
+This auto-detects any `.csv` in `data/raw/` that is not already named `train.csv`,
+`dev.csv`, or `test.csv`, and writes:
+
+```
+data/raw/train.csv   ← 80 %
+data/raw/dev.csv     ← 10 %
+data/raw/test.csv    ← 10 %
+```
+
+You can also point it at a specific file:
+```bash
+python split_dataset.py --source data/raw/race.csv
+```
+
+> `train.csv`, `dev.csv`, and `test.csv` are **always** produced from this 80/10/10
+> split of the single Kaggle file — they are never separate downloads.
 
 ---
 
@@ -146,6 +155,7 @@ os.chdir('/content/drive/MyDrive/AI Project')
 
 ```python
 # Run each training step as a cell:
+!cd src && python split_dataset.py
 !cd src && python preprocessing.py
 !cd src && python model_a_train.py
 !cd src && python model_b_train.py
