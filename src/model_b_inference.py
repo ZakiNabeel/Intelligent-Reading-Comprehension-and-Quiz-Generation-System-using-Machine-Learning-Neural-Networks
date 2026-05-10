@@ -7,12 +7,11 @@ from pathlib import Path
 from sklearn.metrics.pairwise import cosine_similarity
 
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR    = Path(__file__).resolve().parent.parent
 MODEL_B_DIR = BASE_DIR / "models" / "model_b" / "traditional"
 
-vectorizer = joblib.load(
-    MODEL_B_DIR / "model_b_vectorizer.pkl"
-)
+# Shared TF-IDF vectorizer fitted on article + option text from the training split.
+vectorizer = joblib.load(MODEL_B_DIR / "model_b_vectorizer.pkl")
 
 
 def clean_text(text):
@@ -61,38 +60,27 @@ def extract_candidate_phrases(article):
 
 def generate_distractors(article, correct_answer, top_k=3):
     candidates = extract_candidate_phrases(article)
-
     correct_answer_clean = clean_text(correct_answer)
 
+    # Remove the correct answer and any phrase that contains it (or vice versa).
     candidates = [
-        candidate
-        for candidate in candidates
-        if candidate != correct_answer_clean
-        and correct_answer_clean not in candidate
-        and candidate not in correct_answer_clean
+        c for c in candidates
+        if c != correct_answer_clean
+        and correct_answer_clean not in c
+        and c not in correct_answer_clean
     ]
 
     if len(candidates) == 0:
-        return [
-            "No suitable distractor",
-            "No suitable distractor",
-            "No suitable distractor"
-        ]
+        return ["No suitable distractor"] * top_k
 
-    answer_vec = vectorizer.transform([correct_answer_clean])
+    answer_vec     = vectorizer.transform([correct_answer_clean])
     candidate_vecs = vectorizer.transform(candidates)
+    similarities   = cosine_similarity(answer_vec, candidate_vecs)[0]
 
-    similarities = cosine_similarity(
-        answer_vec,
-        candidate_vecs
-    )[0]
-
-    scored_candidates = list(
-        zip(candidates, similarities)
-    )
-
+    # Target similarity ~0.25: similar enough to be plausible, different enough to be wrong.
+    # Sorting by |sim - 0.25| picks the "sweet spot" candidates first.
     scored_candidates = sorted(
-        scored_candidates,
+        zip(candidates, similarities),
         key=lambda x: abs(x[1] - 0.25)
     )
 
@@ -118,45 +106,22 @@ def generate_hints(article, question, top_k=3):
         return [
             "Read the passage carefully.",
             "Look for information related to the question.",
-            "The answer is directly or indirectly present in the passage."
+            "The answer is directly or indirectly present in the passage.",
         ]
 
-    question_vec = vectorizer.transform([
-        clean_text(question)
-    ])
+    question_vec  = vectorizer.transform([clean_text(question)])
+    sentence_vecs = vectorizer.transform([clean_text(s) for s in sentences])
+    similarities  = cosine_similarity(question_vec, sentence_vecs)[0]
 
-    sentence_vecs = vectorizer.transform([
-        clean_text(sentence)
-        for sentence in sentences
-    ])
+    # Rank sentences by ascending cosine similarity, then take the top_k highest.
+    # Returning them in ascending order gives a "general → specific" reveal sequence.
+    ranked = sorted(zip(sentences, similarities), key=lambda x: x[1])
+    selected = sorted(ranked[-top_k:], key=lambda x: x[1])  # keep ascending order
+    hints = [s for s, _ in selected]
 
-    similarities = cosine_similarity(
-        question_vec,
-        sentence_vecs
-    )[0]
-
-    ranked_sentences = sorted(
-        zip(sentences, similarities),
-        key=lambda x: x[1]
-    )
-
-    selected = ranked_sentences[-top_k:]
-
-    selected = sorted(
-        selected,
-        key=lambda x: x[1]
-    )
-
-    hints = [
-        sentence
-        for sentence, score in selected
-    ]
-
+    # Pad with a generic hint if the article has fewer than top_k sentences.
     while len(hints) < top_k:
-        hints.insert(
-            0,
-            "Think about the main idea of the passage."
-        )
+        hints.insert(0, "Think about the main idea of the passage.")
 
     return hints
 

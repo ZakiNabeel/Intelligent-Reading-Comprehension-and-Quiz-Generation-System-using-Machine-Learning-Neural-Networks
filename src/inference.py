@@ -9,107 +9,65 @@ from scipy.sparse import hstack, csr_matrix
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-
 MODEL_DIR = BASE_DIR / "models" / "model_a" / "traditional"
 
+# Models are loaded once at import time; all inference calls share these objects.
+logistic_model = joblib.load(MODEL_DIR / "logistic_regression.pkl")
+svm_model      = joblib.load(MODEL_DIR / "linear_svm.pkl")
+vectorizer     = joblib.load(MODEL_DIR / "tfidf_vectorizer.pkl")
 
-# Load trained models
-logistic_model = joblib.load(
-    MODEL_DIR / "logistic_regression.pkl"
-)
-
-svm_model = joblib.load(
-    MODEL_DIR / "linear_svm.pkl"
-)
-
-vectorizer = joblib.load(
-    MODEL_DIR / "tfidf_vectorizer.pkl"
-)
-
-# Ensemble weights for final score calculation
-LR_WEIGHT = 0.6
-SVM_WEIGHT = 0.4
+# Article is repeated to up-weight passage tokens relative to question/option tokens.
+# Empirically this improves TF-IDF cosine alignment for answer verification.
+LR_WEIGHT  = 0.6   # Logistic Regression contributes 60% — it provides calibrated probabilities.
+SVM_WEIGHT = 0.4   # SVM contributes 40% — it provides a hard margin discriminant score.
 
 
 def build_combined_text(article: str, question: str, option_text: str) -> str:
-    """Combines article, question, and option into a single string for vectorization."""
+    # Article is duplicated so TF-IDF weights passage vocabulary more heavily.
     return f"{article} {article} {question} {option_text}"
 
 
 def compute_cosine_features(article: str, question: str, option_text: str) -> np.ndarray:
-    """Computes cosine similarity features between article, question, and option."""
-    # Transform all texts at once for efficiency
+    """Return shape (1, 3): [sim(q,opt), sim(art,opt), sim(art,q)]."""
     vecs = vectorizer.transform([article, question, option_text])
     article_vec, question_vec, option_vec = vecs[0], vecs[1], vecs[2]
 
-    q_opt = cosine_similarity(question_vec, option_vec)[0][0]
-
-    art_opt = cosine_similarity(article_vec, option_vec)[0][0]
-
-    art_q = cosine_similarity(article_vec, question_vec)[0][0]
+    q_opt   = cosine_similarity(question_vec, option_vec)[0][0]   # question–option overlap
+    art_opt = cosine_similarity(article_vec,  option_vec)[0][0]   # article–option overlap (key signal)
+    art_q   = cosine_similarity(article_vec,  question_vec)[0][0] # article–question relevance
 
     return np.array([q_opt, art_opt, art_q]).reshape(1, -1)
 
 
-def prepare_features(
-    article: str, question: str, option_text: str
-) -> csr_matrix:
-    """
-    Prepares the final feature vector by combining TF-IDF and cosine similarity features.
-    """
-    combined_text = build_combined_text(
-        article,
-        question,
-        option_text
-    )
-
-    tfidf_features = vectorizer.transform([combined_text])
-
-    cosine_features = compute_cosine_features(
-        article,
-        question,
-        option_text
-    )
-
-    final_features = hstack([
-        tfidf_features,
-        cosine_features
-    ])
-
-    return final_features
+def prepare_features(article: str, question: str, option_text: str) -> csr_matrix:
+    """Concatenate TF-IDF sparse vector with 3 cosine similarity features."""
+    tfidf_features  = vectorizer.transform([build_combined_text(article, question, option_text)])
+    cosine_features = compute_cosine_features(article, question, option_text)
+    return hstack([tfidf_features, cosine_features])
 
 
 def predict_best_answer(
     article: str, question: str, options: Dict[str, str]
 ) -> Tuple[str, float, Dict[str, float]]:
     """
-    Predicts the best answer from a list of options using an ensemble of models.
+    Score each option with the LR+SVM ensemble and return the highest-scoring label.
+
+    SVM decision_function output is unbounded; we pass it through a sigmoid so
+    both models contribute scores in [0, 1] before the weighted average.
     """
     results: Dict[str, float] = {}
 
     for label, option_text in options.items():
-        features = prepare_features(
-            article,
-            question,
-            option_text
-        )
+        features = prepare_features(article, question, option_text)
 
-        # Logistic Regression probability
-        lr_prob = logistic_model.predict_proba(features)[0][1]
+        lr_prob   = logistic_model.predict_proba(features)[0][1]
+        svm_raw   = svm_model.decision_function(features)[0]
+        svm_score = 1 / (1 + np.exp(-svm_raw))   # sigmoid normalisation
 
-        # SVM prediction
-        svm_pred = svm_model.decision_function(features)[0]
-
-        # Simple ensemble score
-        svm_score = 1 / (1 + np.exp(-svm_pred))
-
-        final_score = (LR_WEIGHT * lr_prob) + (SVM_WEIGHT * svm_score)
-
-        results[label] = final_score
+        results[label] = (LR_WEIGHT * lr_prob) + (SVM_WEIGHT * svm_score)
 
     best_answer = max(results, key=results.get)
-    confidence = results[best_answer]
-
+    confidence  = results[best_answer]
     return best_answer, confidence, results
 
 
