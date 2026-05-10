@@ -24,6 +24,8 @@ _REQUIRED_MODELS = [
     MODEL_A_DIR / "linear_svm.pkl",
     MODEL_A_DIR / "tfidf_vectorizer.pkl",
     MODEL_B_DIR / "model_b_vectorizer.pkl",
+    MODEL_B_DIR / "model_b_rf_ranker.pkl",
+    MODEL_B_DIR / "model_b_hint_lr.pkl",
 ]
 
 _missing_models = [str(p) for p in _REQUIRED_MODELS if not p.exists()]
@@ -464,10 +466,28 @@ with tab1:
 
     else:
         st.info(
-            "Paste any article and provide a question with four answer options. "
+            "Paste or upload any article and provide a question with four answer options. "
             "Model A will predict the correct answer and Model B will generate hints."
         )
-        article = st.text_area("Article:", height=250, placeholder="Paste your reading passage here…")
+        uploaded_file = st.file_uploader(
+            "Upload article (.txt file):",
+            type=["txt"],
+            help="Upload a plain-text reading passage. Its content will be placed in the text area below.",
+            key="article_uploader",
+        )
+        default_article = ""
+        if uploaded_file is not None:
+            try:
+                default_article = uploaded_file.read().decode("utf-8")
+                st.success(f"Loaded '{uploaded_file.name}' ({len(default_article.split())} words).")
+            except Exception as exc:
+                st.error(f"Could not read file: {exc}")
+        article = st.text_area(
+            "Article:",
+            value=default_article,
+            height=250,
+            placeholder="Paste your reading passage here…",
+        )
         generated_count = st.number_input(
             "Generated questions from this article",
             min_value=1,
@@ -709,11 +729,19 @@ with tab3:
             revealed = st.session_state.hint_count
             total_hints = len(hints)
 
+            # Graduated hint level metadata
+            _hint_levels = [
+                ("General",       "#2d4a2d", "🟢"),
+                ("Specific",      "#4a3a1a", "🟡"),
+                ("Near-explicit", "#4a1a1a", "🔴"),
+            ]
+
             hint_col, prog_col = st.columns([2, 1])
             if hint_col.button(
                 "Show Next Hint",
                 key=f"show_hint_{st.session_state.quiz_id}",
                 disabled=revealed >= total_hints,
+                type="secondary",
             ):
                 st.session_state.hint_count += 1
                 revealed = st.session_state.hint_count
@@ -724,14 +752,35 @@ with tab3:
                 unsafe_allow_html=True,
             )
 
+            st.divider()
             for i in range(st.session_state.hint_count):
-                st.info(f"**Hint {i + 1}:** {hints[i]}")
+                level_label, bg_color, icon = _hint_levels[i] if i < len(_hint_levels) else ("Hint", "#2d2d4a", "💡")
+                hint_text = hints[i]
+                # Strip backend prefix if present (e.g. "Hint 1 (General): ...")
+                for prefix in [f"Hint {i+1} (General): ", f"Hint {i+1} (Specific): ",
+                                f"Hint {i+1} (Near-explicit): ", f"Hint {i+1}: "]:
+                    if hint_text.startswith(prefix):
+                        hint_text = hint_text[len(prefix):]
+                        break
+                st.markdown(
+                    f"<div style='background:{bg_color};border-radius:6px;"
+                    f"padding:12px 16px;margin:6px 0'>"
+                    f"{icon} <strong>Hint {i+1} — {level_label}</strong><br/>"
+                    f"<span style='font-size:0.97em'>{hint_text}</span></div>",
+                    unsafe_allow_html=True,
+                )
 
+            if revealed < total_hints:
+                st.caption(f"Click **Show Next Hint** to reveal hint {revealed + 1} of {total_hints}.")
+
+            # Reveal Answer only appears after ALL hints have been viewed
             if st.session_state.hint_count >= total_hints:
-                st.caption("All hints revealed.")
+                st.divider()
+                st.caption("✅ All hints revealed. You may now reveal the answer.")
                 if st.button(
                     "Reveal Answer",
                     key=f"reveal_answer_{st.session_state.quiz_id}",
+                    type="primary",
                 ):
                     st.success(
                         f"**Answer: {quiz_item['display_correct_label']}.**  "
