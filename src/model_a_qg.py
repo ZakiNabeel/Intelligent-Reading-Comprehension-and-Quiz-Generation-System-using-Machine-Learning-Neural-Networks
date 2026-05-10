@@ -593,7 +593,7 @@ def main():
         logger.info(f"  T{i}: {q}")
 
     logger.info("\n── Step 3: ML Ranking ──")
-    best_q = generate_best_question(passage, answer, model, feature_cols)
+    best_q = generate_best_questions(passage, answer, model, feature_cols, num_questions=1)[0]
     logger.info(f"\n  ★ Best Question: {best_q}")
 
 

@@ -9,6 +9,8 @@ from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import LinearSVC
 from sklearn.cluster import KMeans
+from sklearn.mixture import GaussianMixture
+from sklearn.semi_supervised import LabelPropagation
 
 from sklearn.model_selection import GridSearchCV
 
@@ -374,6 +376,98 @@ def run_kmeans(X_train_tfidf):
 
 
 # =========================================================
+# LABEL PROPAGATION (Semi-Supervised)
+# =========================================================
+
+def run_label_propagation(X_train_tfidf, y_train, unlabeled_fraction=0.3, sample_size=3000):
+    """
+    Semi-supervised Label Propagation.
+
+    Simulates a semi-supervised scenario by masking `unlabeled_fraction` of
+    training labels (set to -1).  LabelPropagation then propagates labels from
+    the known examples to the unlabeled ones via a k-NN graph.
+
+    Evaluation is reported on the originally-labeled subset only, so we can
+    compare fairly against fully-supervised baselines.
+    """
+
+    print("\nRunning Label Propagation (Semi-Supervised)...")
+
+    # Work on a manageable sample (dense matrix required)
+    n = min(sample_size, len(y_train))
+    idx = np.random.RandomState(42).choice(len(y_train), n, replace=False)
+
+    X_dense = X_train_tfidf[idx].toarray()
+    y_sample = y_train.values[idx].copy()
+
+    # Mask a fraction of labels to simulate unlabeled data
+    n_unlabeled = int(n * unlabeled_fraction)
+    rng = np.random.RandomState(0)
+    unlabeled_idx = rng.choice(n, n_unlabeled, replace=False)
+    y_semi = y_sample.copy()
+    y_semi[unlabeled_idx] = -1  # -1 = unlabeled
+
+    lp = LabelPropagation(kernel="knn", n_neighbors=7, max_iter=200)
+    lp.fit(X_dense, y_semi)
+
+    labeled_mask = y_semi != -1
+    lp_preds = lp.predict(X_dense[labeled_mask])
+    true_labels = y_sample[labeled_mask]
+
+    lp_acc = accuracy_score(true_labels, lp_preds)
+    lp_f1  = f1_score(true_labels, lp_preds, average="macro", zero_division=0)
+    lp_cm  = confusion_matrix(true_labels, lp_preds)
+
+    print(f"Label Propagation — labeled subset size : {labeled_mask.sum()}")
+    print(f"Label Propagation — unlabeled subset    : {n_unlabeled}")
+    print(f"Label Propagation — Accuracy            : {lp_acc:.4f}")
+    print(f"Label Propagation — Macro F1            : {lp_f1:.4f}")
+    print(f"Label Propagation — Confusion Matrix:\n{lp_cm}")
+
+    return lp, {"accuracy": lp_acc, "macro_f1": lp_f1, "confusion_matrix": lp_cm}
+
+
+# =========================================================
+# GAUSSIAN MIXTURE MODEL (Unsupervised Clustering)
+# =========================================================
+
+def run_gmm(X_train_tfidf, n_components=2, sample_size=3000):
+    """
+    Gaussian Mixture Model for unsupervised question-answer clustering.
+
+    Uses a dense sample of the TF-IDF matrix.  Reports silhouette score and
+    log-likelihood so results can be compared against KMeans clustering.
+    """
+
+    print("\nRunning Gaussian Mixture Model (GMM) Clustering...")
+
+    n = min(sample_size, X_train_tfidf.shape[0])
+    idx = np.random.RandomState(42).choice(X_train_tfidf.shape[0], n, replace=False)
+    X_dense = X_train_tfidf[idx].toarray()
+
+    gmm = GaussianMixture(
+        n_components=n_components,
+        covariance_type="diag",   # memory-efficient for high-dim TF-IDF
+        max_iter=200,
+        random_state=42,
+    )
+    gmm.fit(X_dense)
+    cluster_labels = gmm.predict(X_dense)
+
+    sil = silhouette_score(X_dense, cluster_labels)
+
+    print(f"GMM Converged        : {gmm.converged_}")
+    print(f"GMM Silhouette Score : {sil:.4f}")
+    print(f"GMM Log-Likelihood   : {gmm.lower_bound_:.4f}")
+
+    cluster_counts = np.bincount(cluster_labels, minlength=n_components)
+    for i, cnt in enumerate(cluster_counts):
+        print(f"  Cluster {i}: {cnt} samples")
+
+    return gmm, {"silhouette_score": sil, "converged": gmm.converged_}
+
+
+# =========================================================
 # HYPERPARAMETER TUNING
 # =========================================================
 
@@ -519,6 +613,46 @@ def main():
     )
 
     # =====================================================
+    # LABEL PROPAGATION (Semi-Supervised)
+    # =====================================================
+
+    lp_model, lp_metrics = run_label_propagation(
+        X_train_tfidf,
+        y_train
+    )
+
+    # =====================================================
+    # GAUSSIAN MIXTURE MODEL
+    # =====================================================
+
+    gmm_model, gmm_metrics = run_gmm(
+        X_train_tfidf
+    )
+
+    # =====================================================
+    # COMPARISON TABLE
+    # =====================================================
+
+    print("\n\nModel Comparison Table")
+    print("=" * 70)
+    print(f"{'Model':<30} {'Accuracy':>10} {'Macro F1':>10}")
+    print("-" * 70)
+
+    for name, model in [("Logistic Regression", logistic_model), ("Linear SVM", svm_model)]:
+        preds = model.predict(X_dev)
+        acc   = accuracy_score(y_dev, preds)
+        f1    = f1_score(y_dev, preds, average="macro", zero_division=0)
+        print(f"{name:<30} {acc:>10.4f} {f1:>10.4f}")
+
+    lp_acc = lp_metrics["accuracy"]
+    lp_f1  = lp_metrics["macro_f1"]
+    print(f"{'Label Propagation (semi-sup)':<30} {lp_acc:>10.4f} {lp_f1:>10.4f}")
+
+    gmm_sil = gmm_metrics["silhouette_score"]
+    print(f"{'GMM Clustering':<30} {'N/A (unsup)':>10} {gmm_sil:>10.4f}  ← silhouette")
+    print("-" * 70)
+
+    # =====================================================
     # SAVE MODELS
     # =====================================================
 
@@ -543,6 +677,18 @@ def main():
         kmeans,
         MODEL_DIR / "kmeans.pkl"
     )
+
+    joblib.dump(
+        lp_model,
+        MODEL_DIR / "label_propagation.pkl"
+    )
+
+    joblib.dump(
+        gmm_model,
+        MODEL_DIR / "gmm.pkl"
+    )
+
+    print("\nAll models saved.")
 
 
 if __name__ == "__main__":
